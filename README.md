@@ -33,13 +33,17 @@ the Bootstrap factory, which manages socket options. So _socket will
 also instantiate a common `NioThreadPoolGroup` (possibly both worker
 and boss) for all subsequent operations.
  
-_socket should use atexit.register to register a shutdown hook that
-does `group.shutdown()`; note this is a deprecated method, but
-`shutdownGracefully()` takes too long. In general, we should expect
-code that is using sockets has done some sort of graceful shutdown at
-the app level and any produced errors will demonstrate where this code
-has not in fact done so. Given that the thread pool is composed of
-daemon threads, this is likely not an issue regardless.
+_socket should use sys.registerCloser(callback) to register a callback
+hook that does `group.shutdown()`; note this is a deprecated method,
+but `shutdownGracefully()` takes too long. In general, we should
+expect code that is using sockets has done some sort of graceful
+shutdown at the app level and any produced errors will demonstrate
+where this code has not in fact done so. Given that the thread pool is
+composed of daemon threads, this is likely not an issue regardless.
+
+`sys` is equivalent to `PySystemState`; this cleanup is called by both
+the JVM shutdown hook process as well as `PySystemState.cleanup` and
+`PythonInterpreter.cleanup`.
 
 Note that Bootstrap/ServerBootstrap, SSLEngine, and other resources
 are fairly lightweight, so they can be simply constructed as needed.
@@ -47,7 +51,7 @@ are fairly lightweight, so they can be simply constructed as needed.
 In certain cases, imports of _socket and usage of Python sockets may
 fail due to security manager restrictions:
 
-* Thread FIXME
+* Thread FIXME specifically around thread groups
 * Socket FIXME
 
 My understanding is that restricting creation of threads is fairly
