@@ -233,20 +233,56 @@ def socket(family=None, type=None, proto=None):
     return _socketobject(family, type, proto)
 
 
-def main():
+
+def parse_http_response(data):
+    # an obviously ridiculous client parse
+    # look for RESPONSE\r\nX: Y\r\n, up to \r\n\r\n, which separates content
+    # this is so ridiculous maybe i should do it incrementally FIXME
+    try:
+        i = data.index("\r\n")
+        response = data[:i]
+        data = data[i+1:]
+        headers, content = data.split("\r\n\r\n")
+    except ValueError:
+        return None, {}, None
+    headers = headers.split("\r\n")
+    parsed_headers = {}
+    for header in headers:
+        i = header.index(":")
+        key = header[:i]
+        value = header[i+1:]
+        parsed_headers[key] = value
+    return response, parsed_headers, content
+
+
+def test_blocking_client():
+    # FIXME add a separate thread that selects on read, to verify this works as expected
     s = socket()
-    # FIXME does non-blocking version of connect not block on DNS? that's what I would presume...
+    # FIXME does non-blocking version of connect not block on DNS?
+    # that's what I would presume for Netty...
     s.connect(("www.python.org", 80))
     s.send("GET / HTTP/1.0\r\n\r\n")
-    while True:
-        # FIXME of course this won't actually terminate; maybe parse Content-Length
-        data = s.recv(13)
-        if data is None:
+    data = ""
+    while True:  # FIXME terminate after a certain period of time
+        chunk = s.recv(13)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        print "Got this chunk:", repr(chunk)
+        data += chunk
+        response, headers, content = parse_http_response(data)
+        if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
             break
-        sys.stdout.write(data)
     print "Completed reading"
+    sys.stdout.write(data)
     # s.close()
 
+
+def test_nonblocking_client():
+    pass
+
+
+def main():
+    # run the "tests" above, with and without ssl
+    test_blocking_client()
+    
 
 if __name__ == "__main__":
     main()
