@@ -19,26 +19,35 @@ from javax.net.ssl import SSLContext
 from java.util.concurrent import TimeUnit
 from java.util.concurrent import LinkedBlockingQueue
 
+
 NIO_GROUP = NioEventLoopGroup()
-# FIXME
-# sys.registerCloser(NIO_GROUP.shutdown)  # ensure deallocation of thread pool if PySystemState.cleanup is called
+
+def _shutdown_threadpool():
+    print >> sys.stderr, "Shutting down thread pool..."
+    NIO_GROUP.shutdown()
+    print >> sys.stderr, "Shut down thread pool."
+
+sys.registerCloser(_shutdown_threadpool)  # ensure deallocation of thread pool if PySystemState.cleanup is called
+
 
 TO_NANOSECONDS = 1000000000
 
 
 class ReadAdapter(ChannelInboundHandlerAdapter):
+
     def __init__(self, sock):
         self.sock = sock
 
     def channelRead(self, ctx, msg):
         # put msg buffs on incoming as they come in;
-        # only guarantee on recv that we receive at most bufferlen
-        msg.retain()
+        # only guarantee on recv that we receive at most bufferlen;
+        msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
         ctx.fireChannelRead(msg)
 
 
 class ReadSelector(ChannelInboundHandlerAdapter):
+
     def __init__(self, selector, sock):
         self.selector = selector
         self.sock = sock
@@ -55,6 +64,7 @@ class ReadSelector(ChannelInboundHandlerAdapter):
 
 
 class WriteSelector(ChannelInboundHandlerAdapter):
+
     def __init__(self, selector, sock):
         self.selector = selector
         self.sock = sock
@@ -71,6 +81,7 @@ class WriteSelector(ChannelInboundHandlerAdapter):
 
 
 class ExceptionSelector(ChannelInboundHandlerAdapter):
+
     def __init__(self, selector, sock):
         self.selector = selector
         self.sock = sock
@@ -109,7 +120,6 @@ def select(rlist, wlist, xlist, timeout=None):
     try:
         while not (selector.selected_rlist and selector.selected_wlist and selector.selected_xlist):
             selector.cv.await(timeout * TO_NANOSECONDS)
-            # accumulate all known objects, see if we have actual selection, set selected=True
     finally:
         selector.cv.release()
     selector.unregister()
@@ -159,13 +169,23 @@ class _socketobject(object):
             future.addListener(notify_selectors)
             return future
 
+    def setblocking(self, mode):
+        self.blocking = mode
+
+    def settimeout(self, timeout):
+        if not timeout:
+            self.blocking = False
+        else:
+            self.timeout = timeout
+
     def connect(self, addr):
         host, port = addr
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel).handler(ReadAdapter(self))
         future = bootstrap.connect(host, port)
-        self.channel = future.channel()  # assume available immediately
-        #self.channel.pipeline().addLast()
+        self.channel = future.channel()
         self._handle_channel_future(future)
+
+    # FIXME handle half-close, shutdown
 
     def send(self, data):
         future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
@@ -178,7 +198,7 @@ class _socketobject(object):
             if self.timeout is None:
                 self.incoming_head = self.incoming.take()
             else:
-                self.incoming_head = self.incoming.poll(self.timeout * TO_MICROSECONDS, TimeUnit.MICROSECONDS)
+                self.incoming_head = self.incoming.poll(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
         else:
             self.incoming_head = self.incoming.poll()
         return
@@ -215,9 +235,16 @@ def socket(family=None, type=None, proto=None):
 
 def main():
     s = socket()
+    # FIXME does non-blocking version of connect not block on DNS? that's what I would presume...
     s.connect(("www.python.org", 80))
     s.send("GET / HTTP/1.0\r\n\r\n")
-    print s.recv(20)
+    while True:
+        # FIXME of course this won't actually terminate; maybe parse Content-Length
+        data = s.recv(13)
+        if data is None:
+            break
+        sys.stdout.write(data)
+    print "Completed reading"
     # s.close()
 
 
