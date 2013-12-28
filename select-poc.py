@@ -16,6 +16,7 @@ from io.netty.channel.nio import NioEventLoopGroup
 from io.netty.channel.socket.nio import NioSocketChannel
 from io.netty.handler.ssl import SslHandler
 from javax.net.ssl import SSLContext
+from java.util import NoSuchElementException
 from java.util.concurrent import TimeUnit
 from java.util.concurrent import LinkedBlockingQueue
 
@@ -41,6 +42,7 @@ class ReadAdapter(ChannelInboundHandlerAdapter):
     def channelRead(self, ctx, msg):
         # put msg buffs on incoming as they come in;
         # only guarantee on recv that we receive at most bufferlen;
+        print "Got data", self.sock
         msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
         ctx.fireChannelRead(msg)
@@ -97,7 +99,8 @@ class _Select(object):
         # Check if any sockets are currently ready; this will immediately exit the select loop below
         self.wlist = wlist
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
-        self.selected_wlist = set(sock for sock in wlist if sock._writable())
+        # self.selected_wlist = set(sock for sock in wlist if sock._writable())
+        self.selected_wlist = set()
         self.selected_xlist = set()
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
@@ -144,10 +147,13 @@ class _socketobject(object):
         return handler
 
     def _unregister_handler(self, handler):
-        self.channel.pipeline().remove(handler)
+        try:
+            self.channel.pipeline().remove(handler)
+        except NoSuchElementException:
+            print "For now, ignoring cannot remove", handler
         self.selectors.remove(handler.selector)
 
-    def _handle_channel_future(self, future):
+    def _handle_channel_future(self, future, reason):
         if self.blocking:
             if self.timeout is None:
                 return future.sync()
@@ -161,11 +167,11 @@ class _socketobject(object):
 
             def notify_selectors(f):
                 for selector in self.selectors:
-                    print "Selector", selector.__dict__
+                    print "Selector", reason, selector.__dict__
                     with selector.cv:
                         if self._writable() and self in selector.wlist:  # FIXME horrible hack
                             selector.selected_wlist.add(self)
-                        print "Notifying connection has happened", selector
+                        print "Notifying connection has happened", reason, selector
                         selector.cv.notify()
 
             future.addListener(notify_selectors)
@@ -185,13 +191,13 @@ class _socketobject(object):
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel).handler(ReadAdapter(self))
         future = bootstrap.connect(host, port)
         self.channel = future.channel()
-        self._handle_channel_future(future)
+        self._handle_channel_future(future, "connect")
 
     # FIXME handle half-close, shutdown
 
     def send(self, data):
         future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
-        self._handle_channel_future(future)
+        self._handle_channel_future(future, "send")
     
     def _get_incoming_msg(self):
         if self.incoming_head is not None:
@@ -317,7 +323,7 @@ def test_nonblocking_client():
 
 def main():
     # run the "tests" above, with and without ssl
-    # test_blocking_client()
+    test_blocking_client()
     test_nonblocking_client()
     
 
