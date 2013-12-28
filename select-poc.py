@@ -1,13 +1,11 @@
-# implement socket, nonblocking and blocking, with ssl stacking
+# implements a spike of socket and select;
+# it should be straighforward to add support of ssl.wrap, ssl.unwrap
 
 import jarray
 import sys
 from itertools import chain
 from threading import Condition
 
-
-
-# Rough translation of http://docs.python.org/2/library/ssl.html#client-side-operation
 
 from io.netty.bootstrap import Bootstrap, ChannelFactory
 from io.netty.buffer import PooledByteBufAllocator, Unpooled
@@ -28,9 +26,13 @@ def _shutdown_threadpool():
     NIO_GROUP.shutdown()
     print >> sys.stderr, "Shut down thread pool."
 
-sys.registerCloser(_shutdown_threadpool)  # ensure deallocation of thread pool if PySystemState.cleanup is called
+# Ensure deallocation of thread pool if PySystemState.cleanup is
+# called; this includes in the event of sigterm
+sys.registerCloser(_shutdown_threadpool)
 
-
+# Keep the highest possible precision from converting from Python's
+# use of floating point for time intervals to Java's use of a long and
+# a specific unit, in this case TimeUnit.NANOSECONDS
 TO_NANOSECONDS = 1000000000
 
 
@@ -97,10 +99,8 @@ class _Select(object):
 
     def __init__(self, rlist, wlist, xlist):
         # Check if any sockets are currently ready; this will immediately exit the select loop below
-        self.wlist = wlist
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
-        # self.selected_wlist = set(sock for sock in wlist if sock._writable())
-        self.selected_wlist = set()
+        self.selected_wlist = set(sock for sock in wlist if sock._writable())
         self.selected_xlist = set()
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
@@ -115,7 +115,7 @@ class _Select(object):
 
 def select(rlist, wlist, xlist, timeout=None):
     # FIXME this logic really should be in _Select, maybe _Select.__call__
-    # Level triggers on rlist, wlist; not clear how to do level triggers on xlist - maybe store exception
+    # Level triggers on rlist, wlist; not clear how to do level triggers on xlist - maybe store exception, maybe do not care
     print "select on", rlist, wlist, xlist, timeout
     selector = _Select(rlist, wlist, xlist)
     with selector.cv:
@@ -169,7 +169,7 @@ class _socketobject(object):
                 for selector in self.selectors:
                     print "Selector", reason, selector.__dict__
                     with selector.cv:
-                        if self._writable() and self in selector.wlist:  # FIXME horrible hack
+                        if self._writable():
                             selector.selected_wlist.add(self)
                         print "Notifying connection has happened", reason, selector
                         selector.cv.notify()
@@ -216,7 +216,7 @@ class _socketobject(object):
                 self.incoming.poll())
 
     def _writable(self):
-        return self.channel.isWritable()
+        return self.channel.isActive() and self.channel.isWritable()
 
     def recv(self, bufsize, flags=0):
         # For obvious reasons, concurrent reads on the same socket
