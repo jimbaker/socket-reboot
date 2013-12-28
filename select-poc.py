@@ -97,7 +97,7 @@ class _Select(object):
         # Check if any sockets are currently ready; this will immediately exit the select loop below
         self.wlist = wlist
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
-        self.selected_wlist = set(sock for sock in rlist if sock._writable())
+        self.selected_wlist = set(sock for sock in wlist if sock._writable())
         self.selected_xlist = set()
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
@@ -296,6 +296,7 @@ def test_nonblocking_client():
     s.connect(("www.python.org", 80))
     print "connected"
     r, w, x = select([], [s], [])
+    print "write select returned", r, w, x
     assert w == [s]
     print "writing"
     s.send("GET / HTTP/1.0\r\n\r\n")
