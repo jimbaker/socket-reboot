@@ -53,13 +53,11 @@ class ReadSelector(ChannelInboundHandlerAdapter):
         self.sock = sock
 
     def channelRead(self, ctx, msg):
+        print "Ready for read", self.sock
         self.selector.selected_rlist.add(self.sock)
         cv = self.selector.cv
-        cv.acquire()
-        try:
+        with cv:
             cv.notify()
-        finally:
-            cv.release()
         ctx.fireChannelRead(msg)
 
 
@@ -70,13 +68,11 @@ class WriteSelector(ChannelInboundHandlerAdapter):
         self.sock = sock
 
     def channelWritabilityChanged(self, ctx):
+        print "Ready for write", self.sock
         self.selector.selected_wlist.add(self.sock)
         cv = self.selector.cv
-        cv.acquire()
-        try:
+        with cv:
             cv.notify()
-        finally:
-            cv.release()
         ctx.fireChannelWritabilityChanged()
 
 
@@ -87,41 +83,44 @@ class ExceptionSelector(ChannelInboundHandlerAdapter):
         self.sock = sock
 
     def exceptionCaught(self, ctx, cause):
+        print "Ready for exception", self.sock, cause
         self.selector.selected_xlist.add(self.sock)
         cv = self.selector.cv
-        cv.acquire()
-        try:
+        with cv:
             cv.notify()
-        finally:
-            cv.release()
         ctx.fireExceptionCaught(cause) 
 
 
 class _Select(object):
 
     def __init__(self, rlist, wlist, xlist):
+        # Check if any sockets are currently ready; this will immediately exit the select loop below
+        self.wlist = wlist
+        self.selected_rlist = set(sock for sock in rlist if sock._readable())
+        self.selected_wlist = set(sock for sock in rlist if sock._writable())
+        self.selected_xlist = set()
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
         self.registered_xlist = [sock._register_handler(ExceptionSelector, self) for sock in xlist]
-        self.selected_rlist = set()
-        self.selected_wlist = set()
-        self.selected_xlist = set()
         self.cv = Condition()
 
     def unregister(self):
         for handler in chain(self.registered_rlist, self.registered_wlist, self.registered_xlist):
+            sock = handler.sock
             sock._unregister_handler(handler)
 
 
 def select(rlist, wlist, xlist, timeout=None):
+    # FIXME this logic really should be in _Select, maybe _Select.__call__
+    # Level triggers on rlist, wlist; not clear how to do level triggers on xlist - maybe store exception
+    print "select on", rlist, wlist, xlist, timeout
     selector = _Select(rlist, wlist, xlist)
-    selector.register()
-    selector.cv.acquire()
-    try:
-        while not (selector.selected_rlist and selector.selected_wlist and selector.selected_xlist):
-            selector.cv.await(timeout * TO_NANOSECONDS)
-    finally:
-        selector.cv.release()
+    with selector.cv:
+        while not (selector.selected_rlist or selector.selected_wlist or selector.selected_xlist):
+            print "waiting on", selector.registered_rlist, selector.registered_wlist, selector.registered_xlist
+            print "selected  ", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
+            selector.cv.wait(timeout)
+    print "selected 2", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
     selector.unregister()
     return sorted(selector.selected_rlist), sorted(selector.selected_wlist), sorted(selector.selected_xlist)
 
@@ -141,10 +140,12 @@ class _socketobject(object):
     def _register_handler(self, handler_class, selector):
         handler = handler_class(selector, self)
         self.channel.pipeline().addLast(handler)
+        self.selectors.add(selector)
         return handler
 
     def _unregister_handler(self, handler):
         self.channel.pipeline().remove(handler)
+        self.selectors.remove(handler.selector)
 
     def _handle_channel_future(self, future):
         if self.blocking:
@@ -160,11 +161,12 @@ class _socketobject(object):
 
             def notify_selectors(f):
                 for selector in self.selectors:
-                    selector.cv.acquire()
-                    try:
+                    print "Selector", selector.__dict__
+                    with selector.cv:
+                        if self._writable() and self in selector.wlist:  # FIXME horrible hack
+                            selector.selected_wlist.add(self)
+                        print "Notifying connection has happened", selector
                         selector.cv.notify()
-                    finally:
-                        selector.cv.release()
 
             future.addListener(notify_selectors)
             return future
@@ -203,9 +205,17 @@ class _socketobject(object):
             self.incoming_head = self.incoming.poll()
         return
 
+    def _readable(self):
+        return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
+                self.incoming.poll())
+
+    def _writable(self):
+        return self.channel.isWritable()
+
     def recv(self, bufsize, flags=0):
-        # For obvious reasons, concurrent reads on the same socket have to be
-        # locked; I don't believe it is the job of recv to do this
+        # For obvious reasons, concurrent reads on the same socket
+        # have to be locked; I don't believe it is the job of recv to
+        # do this; this is the policy of say SocketChannel
         self._get_incoming_msg()
         msg = self.incoming_head
         if msg is None:
@@ -218,6 +228,11 @@ class _socketobject(object):
             self.incoming_head = None
         return buf.tostring()
 
+
+# ssl.wrap essentially creates a SSLEngine instance, then adds the
+# handler; the engine is kept around for the duration of the wrap for
+# later potential usage, such as getting peer certificates from the #
+# handshake
 
 class SSLInitializer(ChannelInitializer):
 
@@ -276,12 +291,33 @@ def test_blocking_client():
 
 
 def test_nonblocking_client():
-    pass
+    s = socket()
+    s.setblocking(False)
+    s.connect(("www.python.org", 80))
+    print "connected"
+    r, w, x = select([], [s], [])
+    assert w == [s]
+    print "writing"
+    s.send("GET / HTTP/1.0\r\n\r\n")
+    data = ""
+    while True:  # FIXME terminate after a certain period of time
+        r, w, x = select([s], [], [])  # verify we got s back
+        print "read select returned", r, w, x
+        assert r == [s]
+        chunk = s.recv(13)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        print "Got this chunk:", repr(chunk)
+        data += chunk
+        response, headers, content = parse_http_response(data)
+        if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
+            break
+    print "Completed reading"
+    sys.stdout.write(data)
 
 
 def main():
     # run the "tests" above, with and without ssl
-    test_blocking_client()
+    # test_blocking_client()
+    test_nonblocking_client()
     
 
 if __name__ == "__main__":
