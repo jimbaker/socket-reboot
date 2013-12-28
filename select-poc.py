@@ -99,13 +99,13 @@ class _Select(object):
 
     def __init__(self, rlist, wlist, xlist):
         # Check if any sockets are currently ready; this will immediately exit the select loop below
+        self.cv = Condition()
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
         self.selected_wlist = set(sock for sock in wlist if sock._writable())
         self.selected_xlist = set()
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
         self.registered_xlist = [sock._register_handler(ExceptionSelector, self) for sock in xlist]
-        self.cv = Condition()
 
     def unregister(self):
         for handler in chain(self.registered_rlist, self.registered_wlist, self.registered_xlist):
@@ -123,8 +123,9 @@ def select(rlist, wlist, xlist, timeout=None):
             print "waiting on", selector.registered_rlist, selector.registered_wlist, selector.registered_xlist
             print "selected  ", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
             selector.cv.wait(timeout)
+        selector.unregister()
+
     print "selected 2", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
-    selector.unregister()
     return sorted(selector.selected_rlist), sorted(selector.selected_wlist), sorted(selector.selected_xlist)
 
 
@@ -147,10 +148,7 @@ class _socketobject(object):
         return handler
 
     def _unregister_handler(self, handler):
-        try:
-            self.channel.pipeline().remove(handler)
-        except NoSuchElementException:
-            print "For now, ignoring cannot remove", handler
+        self.channel.pipeline().remove(handler)
         self.selectors.remove(handler.selector)
 
     def _handle_channel_future(self, future, reason):
