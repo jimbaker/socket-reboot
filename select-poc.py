@@ -3,9 +3,9 @@
 
 import jarray
 import sys
+import time
 from itertools import chain
 from threading import Condition
-
 
 from io.netty.bootstrap import Bootstrap, ChannelFactory
 from io.netty.buffer import PooledByteBufAllocator, Unpooled
@@ -106,9 +106,17 @@ class _Select(object):
         # exiting the select loop below
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
         self.selected_wlist = set(sock for sock in wlist if sock._writable())
+
         # Not clear how to do level triggers on xlist, since it seems
         # to be both poorly defined AND rarely used
         self.selected_xlist = set()
+
+        # Connections can tell us we are writable, but they use a
+        # separate notification mechanism. We may not care, so keep
+        # intent separate from registration step below of
+        # WriteSelector. Note that close probably has similar
+        # semantics and may include read.
+        self.wlist = set(wlist)
 
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
@@ -179,10 +187,10 @@ class _socketobject(object):
                 for selector in self.selectors:
                     print "Selector", reason, selector.__dict__
                     with selector.cv:
-                        if self._writable():
+                        if self._writable() and self in selector.wlist:
                             selector.selected_wlist.add(self)
-                        print "Notifying connection has happened", reason, selector
-                        selector.cv.notify()
+                            print "Notifying connection has happened", reason, selector
+                            selector.cv.notify()
 
             future.addListener(notify_selectors)
             return future
@@ -202,6 +210,10 @@ class _socketobject(object):
         future = bootstrap.connect(host, port)
         self.channel = future.channel()
         self._handle_channel_future(future, "connect")
+
+    def close(self):
+        future = self.channel.close()
+        self._handle_channel_future(future, "close")
 
     # FIXME handle half-close, shutdown
 
@@ -290,8 +302,6 @@ def parse_http_response(data):
 def test_blocking_client():
     # FIXME add a separate thread that selects on read, to verify this works as expected
     s = socket()
-    # FIXME does non-blocking version of connect not block on DNS?
-    # that's what I would presume for Netty...
     s.connect(("www.python.org", 80))
     s.send("GET / HTTP/1.0\r\n\r\n")
     data = ""
@@ -304,12 +314,14 @@ def test_blocking_client():
             break
     print "Completed reading"
     sys.stdout.write(data)
-    # s.close()
+    s.close()  # blocks
 
 
 def test_nonblocking_client():
     s = socket()
     s.setblocking(False)
+    # FIXME does non-blocking version of connect not block on DNS lookup?
+    # that's what I would presume for Netty...
     s.connect(("www.python.org", 80))
     print "connected"
     r, w, x = select([], [s], [])
@@ -330,12 +342,16 @@ def test_nonblocking_client():
             break
     print "Completed reading"
     sys.stdout.write(data)
+    s.close()  # not blocking, what we should we test here? FIXME
 
 
 def main():
     # run the "tests" above, with and without ssl
-    test_blocking_client()
-    test_nonblocking_client()
+    #test_blocking_client()
+    # stop using python.org :) use a local CPython server instead for actual testing
+    for i in xrange(20):
+        test_nonblocking_client()
+        time.sleep(2)
     
 
 if __name__ == "__main__":
