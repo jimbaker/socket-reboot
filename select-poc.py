@@ -36,6 +36,10 @@ sys.registerCloser(_shutdown_threadpool)
 TO_NANOSECONDS = 1000000000
 
 
+SHUT_RD, SHUT_WR = 1, 2
+SHUT_RDWR = SHUT_RD | SHUT_WR
+
+
 class ReadAdapter(ChannelInboundHandlerAdapter):
 
     def __init__(self, sock):
@@ -149,6 +153,12 @@ def select(rlist, wlist, xlist, timeout=None):
     return selector(timeout)
 
 
+# FIXME how much difference between server and peer sockets?
+
+# shutdown should be straightforward - we get to choose what to do
+# with a server socket in terms of accepting new connections
+
+
 class _socketobject(object):
 
     def __init__(self, family=None, type=None, proto=None):
@@ -160,6 +170,8 @@ class _socketobject(object):
         self.incoming = LinkedBlockingQueue()  # list of read buffers
         self.incoming_head = None  # allows msg buffers to be broken up
         self.selectors = set()
+        self.read_adapter = None
+        self.can_write = True
 
     def _register_handler(self, handler_class, selector):
         handler = handler_class(selector, self)
@@ -206,7 +218,8 @@ class _socketobject(object):
 
     def connect(self, addr):
         host, port = addr
-        bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel).handler(ReadAdapter(self))
+        self.read_adapter = ReadAdapter(self)
+        bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel).handler(self.read_adapter)
         future = bootstrap.connect(host, port)
         self.channel = future.channel()
         self._handle_channel_future(future, "connect")
@@ -215,9 +228,19 @@ class _socketobject(object):
         future = self.channel.close()
         self._handle_channel_future(future, "close")
 
-    # FIXME handle half-close, shutdown
+    # FIXME handle shutdown - basically this should remove the read
+    # handler for read shutdown and raise an exception on future
+    # writes
+
+    def shutdown(self, how):
+        if how & SHUT_RD:
+            self.channel.pipeline().remove(self.read_adapter)
+        if how & SHUT_WR:
+            self.can_write = False
 
     def send(self, data):
+        if not self.can_write:
+            raise Exception("Cannot write to closed socket")  # FIXME use actual exception
         future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
         self._handle_channel_future(future, "send")
     
@@ -258,9 +281,9 @@ class _socketobject(object):
         return buf.tostring()
 
 
-# ssl.wrap essentially creates a SSLEngine instance, then adds the
-# handler; the engine is kept around for the duration of the wrap for
-# later potential usage, such as getting peer certificates from the #
+# ssl.wrap_socket essentially creates a SSLEngine instance, then adds the
+# handler; the engine needs to be kept around for the duration of the wrap for
+# later potential usage, such as getting peer certificates from the
 # handshake
 
 class SSLInitializer(ChannelInitializer):
@@ -346,12 +369,10 @@ def test_nonblocking_client():
 
 
 def main():
-    # run the "tests" above, with and without ssl
-    #test_blocking_client()
-    # stop using python.org :) use a local CPython server instead for actual testing
-    for i in xrange(20):
-        test_nonblocking_client()
-        time.sleep(2)
+    # FIXME run the "tests" with ssl
+    # stop using python.org :) use a local CPython server instead for actual testing/compliance
+    test_blocking_client()
+    test_nonblocking_client()
     
 
 if __name__ == "__main__":
