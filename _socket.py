@@ -148,9 +148,6 @@ class _Select(object):
         return sorted(self.selected_rlist), sorted(self.selected_wlist), sorted(self.selected_xlist)
 
 
-def select(rlist, wlist, xlist, timeout=None):
-    selector = _Select(rlist, wlist, xlist)
-    return selector(timeout)
 
 
 # FIXME how much difference between server and peer sockets?
@@ -295,7 +292,43 @@ class SSLInitializer(ChannelInitializer):
         pipeline.addLast("ssl", SslHandler(engine))
 
 
+# helpful advice for being able to manage ca_certs outside of Java's keystore
+# specifically the example ReloadableX509TrustManager
+# http://jcalcote.wordpress.com/2010/06/22/managing-a-dynamic-java-trust-store/
+
+# in the case of http://docs.python.org/2/library/ssl.html#ssl.CERT_REQUIRED
+
+# http://docs.python.org/2/library/ssl.html#ssl.CERT_NONE
+# https://github.com/rackerlabs/romper/blob/master/romper/trust.py#L15
+#
+# it looks like CERT_OPTIONAL simply validates certificates if
+# provided, probably something in checkServerTrusted - maybe a None
+# arg? need to verify as usual with a real system... :)
+
+# http://alesaudate.wordpress.com/2010/08/09/how-to-dynamically-select-a-certificate-alias-when-invoking-web-services/
+# is somewhat relevant for managing the keyfile, certfile
+
+
+# EXPORTED constructors
 
 def socket(family=None, type=None, proto=None):
     return _socketobject(family, type, proto)
 
+
+def select(rlist, wlist, xlist, timeout=None):
+    return _Select(rlist, wlist, xlist)(timeout)
+
+
+def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE,
+                ssl_version=None, ca_certs=None, do_handshake_on_connect=True,
+                suppress_ragged_eofs=True, ciphers=None):
+    # instantiates a SSLEngine, with the following set:
+    # do_handshake_on_connect is always True, since it's always nonblocking... verify this works with Python code
+    # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
+    # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
+    # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
+
+
+
+def unwrap_socket(sock):
+    pass
