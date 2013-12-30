@@ -98,11 +98,18 @@ class ExceptionSelector(ChannelInboundHandlerAdapter):
 class _Select(object):
 
     def __init__(self, rlist, wlist, xlist):
-        # Check if any sockets are currently ready; this will immediately exit the select loop below
         self.cv = Condition()
+
+        # Checking if sockets are ready (readable OR writable)
+        # converts selection from detecting edges to detecting levels;
+        # Doing this check here will have the effect of immediately
+        # exiting the select loop below
         self.selected_rlist = set(sock for sock in rlist if sock._readable())
         self.selected_wlist = set(sock for sock in wlist if sock._writable())
+        # Not clear how to do level triggers on xlist, since it seems
+        # to be both poorly defined AND rarely used
         self.selected_xlist = set()
+
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
         self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
         self.registered_xlist = [sock._register_handler(ExceptionSelector, self) for sock in xlist]
@@ -112,21 +119,26 @@ class _Select(object):
             sock = handler.sock
             sock._unregister_handler(handler)
 
+    def __call__(self, timeout):
+        with self.cv:
+            # As usual with condition variables, we need to ensure
+            # there's not a spurious wakeup; this test also helps
+            # shortcircuit if the socket was in fact ready before the
+            # select call
+            while not (self.selected_rlist or self.selected_wlist or self.selected_xlist):
+                print "waiting on", self.registered_rlist, self.registered_wlist, self.registered_xlist
+                print "selected  ", self.selected_rlist, self.selected_wlist, self.selected_xlist
+                self.cv.wait(timeout)
+            # Need to be in the context of the condition variable to avoid racing on unregistration
+            self.unregister()
+
+        print "selected 2", self.selected_rlist, self.selected_wlist, self.selected_xlist
+        return sorted(self.selected_rlist), sorted(self.selected_wlist), sorted(self.selected_xlist)
+
 
 def select(rlist, wlist, xlist, timeout=None):
-    # FIXME this logic really should be in _Select, maybe _Select.__call__
-    # Level triggers on rlist, wlist; not clear how to do level triggers on xlist - maybe store exception, maybe do not care
-    print "select on", rlist, wlist, xlist, timeout
     selector = _Select(rlist, wlist, xlist)
-    with selector.cv:
-        while not (selector.selected_rlist or selector.selected_wlist or selector.selected_xlist):
-            print "waiting on", selector.registered_rlist, selector.registered_wlist, selector.registered_xlist
-            print "selected  ", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
-            selector.cv.wait(timeout)
-        selector.unregister()
-
-    print "selected 2", selector.selected_rlist, selector.selected_wlist, selector.selected_xlist
-    return sorted(selector.selected_rlist), sorted(selector.selected_wlist), sorted(selector.selected_xlist)
+    return selector(timeout)
 
 
 class _socketobject(object):
@@ -219,7 +231,8 @@ class _socketobject(object):
     def recv(self, bufsize, flags=0):
         # For obvious reasons, concurrent reads on the same socket
         # have to be locked; I don't believe it is the job of recv to
-        # do this; this is the policy of say SocketChannel
+        # do this; in particular this is the policy of SocketChannel,
+        # which underlies Netty's support for such channels.
         self._get_incoming_msg()
         msg = self.incoming_head
         if msg is None:
