@@ -33,6 +33,9 @@ def test_blocking_client():
     data = ""
     while True:  # FIXME terminate after a certain period of time
         chunk = s.recv(13)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        if chunk == "":
+            print "No more data, ending"
+            break
         print "Got this chunk:", repr(chunk)
         data += chunk
         response, headers, content = parse_http_response(data)
@@ -61,6 +64,9 @@ def test_nonblocking_client():
         print "read select returned", r, w, x
         assert r == [s]
         chunk = s.recv(13)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        if chunk == "":
+            print "No more data, ending"
+            break
         print "Got this chunk:", repr(chunk)
         data += chunk
         response, headers, content = parse_http_response(data)
@@ -78,17 +84,19 @@ def test_blocking_ssl_client():
     s.send("GET / HTTP/1.0\r\nHost: www.verisign.com\r\n\r\n")
     data = ""
     while True:  # FIXME terminate after a certain period of time
-        chunk = s.recv(100)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        chunk = s.recv(100)
+        if chunk == "":
+            print "No more data, ending"
+            break
         print "Got this chunk:", repr(chunk)
         data += chunk
         response, headers, content = parse_http_response(data)
-        # FIXME verisign doesn't return such content - presumably we can detect otherwise
+        # FIXME verisign doesn't return such content - presumably we can detect otherwise by getting an "" on recv
         if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
             break
     print "Completed reading"
     sys.stdout.write(data)
     s.close()  # blocks
-
 
 
 def main():
@@ -97,6 +105,7 @@ def main():
     test_blocking_client()
     test_nonblocking_client()
     test_blocking_ssl_client()
+
 
 if __name__ == "__main__":
     main()

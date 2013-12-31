@@ -41,6 +41,10 @@ SHUT_RDWR = SHUT_RD | SHUT_WR
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
 
 
+_END_RECV_DATA = object()
+
+
+
 class ReadAdapter(ChannelInboundHandlerAdapter):
 
     def __init__(self, sock):
@@ -231,6 +235,14 @@ class _socketobject(object):
         self._handle_channel_future(future, "connect")
         if self.connect_handlers:
             self.channel.pipeline().addLast(self.read_adapter)
+        
+        def say_im_closed(x):
+            # FIXME can x be an exception we would like to raise in the recv?
+            print "My channel is closed, it's pointless to keep reading", x
+            self.incoming.put(_END_RECV_DATA)
+
+        self.channel.closeFuture().addListener(say_im_closed)
+
 
     def close(self):
         future = self.channel.close()
@@ -276,6 +288,9 @@ class _socketobject(object):
         msg = self.incoming_head
         if msg is None:
             return None
+        elif msg is _END_RECV_DATA:
+            self.incoming_head = None
+            return ""
         msg_length = msg.readableBytes()
         buf = jarray.zeros(min(msg_length, bufsize), "b")
         msg.readBytes(buf)
