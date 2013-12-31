@@ -316,12 +316,12 @@ class _socketobject(object):
 
 class SSLInitializer(ChannelInitializer):
 
-    def __init__(self, engine):
-        self.engine = engine
+    def __init__(self, ssl_handler):
+        self.ssl_handler = ssl_handler
 
     def initChannel(self, ch):
         pipeline = ch.pipeline()
-        pipeline.addLast("ssl", SslHandler(self.engine))
+        pipeline.addLast("ssl", self.ssl_handler) 
 
 
 
@@ -334,11 +334,23 @@ class SSLSocket(object):
         self.sock = sock
         self.engine = SSLContext.getDefault().createSSLEngine()
         self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
+        self.ssl_handler = SslHandler(self.engine)
+
+        def handshake_step(x):
+            print "Handshaking", x
+            for selector in self.sock.selectors:
+                with selector.cv:
+                    if self in selector.wlist:
+                        selector.selected_wlist.add(self)
+                        print "Notifying connection we can write", selector
+                        selector.cv.notify()
+
+        self.ssl_handler.handshakeFuture().addListener(handshake_step)
 
         # if already connected, do this
         # self.sock.channel.pipeline().addLast("ssl", SslHandler(self.engine))
         # else add the SSLInitializer:
-        self.sock.connect_handlers.append(SSLInitializer(self.engine))
+        self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def connect(self, addr):
         print "Connecting SSL socket"
