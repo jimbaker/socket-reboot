@@ -123,8 +123,9 @@ class _Select(object):
         # Connections can tell us we are writable, but they use a
         # separate notification mechanism. We may not care, so keep
         # intent separate from registration step below of
-        # WriteSelector. Note that close probably has similar
-        # semantics and may include read.
+        # WriteSelector. Note that peer close has similar semantics
+        # for read notification.
+        self.rlist = set(rlist)
         self.wlist = set(wlist)
 
         self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
@@ -171,7 +172,7 @@ class _socketobject(object):
         self.channel = None
         self.incoming = LinkedBlockingQueue()  # list of read buffers
         self.incoming_head = None  # allows msg buffers to be broken up
-        self.selectors = set()
+        self.selectors = set()  # weak consistency in iteration is probably OK
         self.read_adapter = None
         self.can_write = True
         self.connect_handlers = []
@@ -240,9 +241,14 @@ class _socketobject(object):
             # FIXME can x be an exception we would like to raise in the recv?
             print "My channel is closed, it's pointless to keep reading", x
             self.incoming.put(_END_RECV_DATA)
+            for selector in self.selectors:
+                with selector.cv:
+                    if self in selector.rlist:
+                        selector.selected_rlist.add(self)
+                        print "Notifying connection close by peer has happened", selector
+                        selector.cv.notify()
 
         self.channel.closeFuture().addListener(say_im_closed)
-
 
     def close(self):
         future = self.channel.close()
@@ -319,7 +325,8 @@ class SSLInitializer(ChannelInitializer):
 
 
 
-# Need a wrapper just in case users of this class want to access certs and other info from the underlying SSLEngine
+# Need a delegation wrapper just in case users of this class want to
+# access certs and other info from the underlying SSLEngine
 
 class SSLSocket(object):
     
@@ -329,7 +336,7 @@ class SSLSocket(object):
         self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
 
         # if already connected, do this
-        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine))
+        # self.sock.channel.pipeline().addLast("ssl", SslHandler(self.engine))
         # else add the SSLInitializer:
         self.sock.connect_handlers.append(SSLInitializer(self.engine))
 
@@ -351,6 +358,18 @@ class SSLSocket(object):
 
     def shutdown(self, how):
         self.sock.shutdown(how)
+
+    def _readable(self):
+        return self.sock._readable()
+
+    def _writable(self):
+        return self.sock._writable()
+
+    def _register_handler(self, handler_class, selector):
+        return self.sock._register_handler(handler_class, selector)
+
+    def _unregister_handler(self, handler):
+        return self.sock._unregister_handler(handler)
 
 
 # helpful advice for being able to manage ca_certs outside of Java's keystore

@@ -99,12 +99,45 @@ def test_blocking_ssl_client():
     s.close()  # blocks
 
 
+def test_nonblocking_ssl_client():
+    s = socket()
+    s.setblocking(False)
+    s = wrap_socket(s)
+    s.connect(("www.verisign.com", 443))
+    print "connected"
+    r, w, x = select([], [s], [])
+    print "write select returned", r, w, x
+    assert w == [s]
+    print "writing"
+    s.send("GET / HTTP/1.0\r\nHost: www.verisign.com\r\n\r\n")
+    data = ""
+    while True:  # FIXME terminate after a certain period of time
+        r, w, x = select([s], [], [])  # verify we got s back
+        print "read select returned", r, w, x
+        assert r == [s]
+        chunk = s.recv(100)
+        if chunk == "":
+            print "No more data, ending"
+            break
+        print "Got this chunk:", repr(chunk)
+        data += chunk
+        response, headers, content = parse_http_response(data)
+        # FIXME verisign doesn't return such content - presumably we can detect otherwise by getting an "" on recv
+        if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
+            break
+    print "Completed reading"
+    sys.stdout.write(data)
+    s.close()
+
+
+
 def main():
-    # FIXME run the "tests" with ssl
+    # FIXME actually make these "tests" real tests that assert results
     # stop using python.org :) use a local CPython server instead for actual testing/compliance
-    test_blocking_client()
-    test_nonblocking_client()
-    test_blocking_ssl_client()
+    #test_blocking_client()
+    #test_nonblocking_client()
+    #test_blocking_ssl_client()
+    test_nonblocking_ssl_client()
 
 
 if __name__ == "__main__":
