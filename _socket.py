@@ -38,6 +38,7 @@ TO_NANOSECONDS = 1000000000
 
 SHUT_RD, SHUT_WR = 1, 2
 SHUT_RDWR = SHUT_RD | SHUT_WR
+CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
 
 
 class ReadAdapter(ChannelInboundHandlerAdapter):
@@ -169,6 +170,7 @@ class _socketobject(object):
         self.selectors = set()
         self.read_adapter = None
         self.can_write = True
+        self.connect_handlers = []
 
     def _register_handler(self, handler_class, selector):
         handler = handler_class(selector, self)
@@ -216,18 +218,23 @@ class _socketobject(object):
     def connect(self, addr):
         host, port = addr
         self.read_adapter = ReadAdapter(self)
-        bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel).handler(self.read_adapter)
+        bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
+        if self.connect_handlers:
+            for handler in self.connect_handlers:
+                print "Adding connect handler", handler
+                bootstrap.handler(handler)
+        else:
+            bootstrap.handler(self.read_adapter)
+        # FIXME also support any options here
         future = bootstrap.connect(host, port)
         self.channel = future.channel()
         self._handle_channel_future(future, "connect")
+        if self.connect_handlers:
+            self.channel.pipeline().addLast(self.read_adapter)
 
     def close(self):
         future = self.channel.close()
         self._handle_channel_future(future, "close")
-
-    # FIXME handle shutdown - basically this should remove the read
-    # handler for read shutdown and raise an exception on future
-    # writes
 
     def shutdown(self, how):
         if how & SHUT_RD:
@@ -283,13 +290,52 @@ class _socketobject(object):
 # later potential usage, such as getting peer certificates from the
 # handshake
 
+# An initializer like this is necessary for any peer sockets built by a server socket;
+# otherwise presumably we can just add to a peer socket in client mode. Must try now!
+
 class SSLInitializer(ChannelInitializer):
+
+    def __init__(self, engine):
+        self.engine = engine
 
     def initChannel(self, ch):
         pipeline = ch.pipeline()
-        engine = SSLContext.getDefault().createSSLEngine()
-        engine.setUseClientMode(True);
-        pipeline.addLast("ssl", SslHandler(engine))
+        pipeline.addLast("ssl", SslHandler(self.engine))
+
+
+
+# Need a wrapper just in case users of this class want to access certs and other info from the underlying SSLEngine
+
+class SSLSocket(object):
+    
+    def __init__(self, sock):
+        self.sock = sock
+        self.engine = SSLContext.getDefault().createSSLEngine()
+        self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
+
+        # if already connected, do this
+        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine))
+        # else add the SSLInitializer:
+        self.sock.connect_handlers.append(SSLInitializer(self.engine))
+
+    def connect(self, addr):
+        print "Connecting SSL socket"
+        self.sock.connect(addr)
+        print "Connected"
+
+    def send(self, data):
+        print "Sending data over SSL socket..."
+        self.sock.send(data)
+        print "Sent data"
+
+    def recv(self, bufsize, flags=0):
+        return self.sock.recv(bufsize, flags)
+        
+    def close(self):
+        self.sock.close()
+
+    def shutdown(self, how):
+        self.sock.shutdown(how)
 
 
 # helpful advice for being able to manage ca_certs outside of Java's keystore
@@ -327,7 +373,7 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
-
+    return SSLSocket(sock)
 
 
 def unwrap_socket(sock):

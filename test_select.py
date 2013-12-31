@@ -1,6 +1,7 @@
 import sys
 from socket import socket
 from select import select
+from ssl import wrap_socket
 
 
 def parse_http_response(data):
@@ -70,12 +71,32 @@ def test_nonblocking_client():
     s.close()  # not blocking, what we should we test here? FIXME
 
 
+def test_blocking_ssl_client():
+    s = socket()
+    s = wrap_socket(s)
+    s.connect(("www.verisign.com", 443))
+    s.send("GET / HTTP/1.0\r\nHost: www.verisign.com\r\n\r\n")
+    data = ""
+    while True:  # FIXME terminate after a certain period of time
+        chunk = s.recv(100)  # use a small prime to ensure that Netty's buffers REALLY get broken up
+        print "Got this chunk:", repr(chunk)
+        data += chunk
+        response, headers, content = parse_http_response(data)
+        # FIXME verisign doesn't return such content - presumably we can detect otherwise
+        if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
+            break
+    print "Completed reading"
+    sys.stdout.write(data)
+    s.close()  # blocks
+
+
+
 def main():
     # FIXME run the "tests" with ssl
     # stop using python.org :) use a local CPython server instead for actual testing/compliance
     test_blocking_client()
     test_nonblocking_client()
-    
+    test_blocking_ssl_client()
 
 if __name__ == "__main__":
     main()
