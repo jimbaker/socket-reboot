@@ -70,7 +70,9 @@ class ReadSelector(ChannelInboundHandlerAdapter):
         self.selector.selected_rlist.add(self.sock)
         cv = self.selector.cv
         with cv:
+            print "Notifying selector"
             cv.notify()
+        print "Notified"
         ctx.fireChannelRead(msg)
 
 
@@ -147,8 +149,11 @@ class _Select(object):
                 print "waiting on", self.registered_rlist, self.registered_wlist, self.registered_xlist
                 print "selected  ", self.selected_rlist, self.selected_wlist, self.selected_xlist
                 self.cv.wait(timeout)
+                print "Completed waiting", self
             # Need to be in the context of the condition variable to avoid racing on unregistration
+            print "Unregistering", self
             self.unregister()
+            print "Unregistered"
 
         print "selected 2", self.selected_rlist, self.selected_wlist, self.selected_xlist
         return sorted(self.selected_rlist), sorted(self.selected_wlist), sorted(self.selected_xlist)
@@ -184,8 +189,11 @@ class _socketobject(object):
         return handler
 
     def _unregister_handler(self, handler):
-        self.channel.pipeline().remove(handler)
+        # FIXME currently this ordering matters, to prevent deadlock;
+        # really should look at unifying the two types of handling
+        # below
         self.selectors.remove(handler.selector)
+        self.channel.pipeline().remove(handler)
 
     def _handle_channel_future(self, future, reason):
         if self.blocking:
@@ -242,7 +250,9 @@ class _socketobject(object):
             print "My channel is closed, it's pointless to keep reading", x
             self.incoming.put(_END_RECV_DATA)
             for selector in self.selectors:
+                print "Notifying selector (if interested)", selector
                 with selector.cv:
+                    print "Acquired selector condition", selector
                     if self in selector.rlist:
                         selector.selected_rlist.add(self)
                         print "Notifying connection close by peer has happened", selector
