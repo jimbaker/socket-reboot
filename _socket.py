@@ -15,8 +15,7 @@ from io.netty.channel.socket.nio import NioSocketChannel
 from io.netty.handler.ssl import SslHandler
 from javax.net.ssl import SSLContext
 from java.util import NoSuchElementException
-from java.util.concurrent import TimeUnit
-from java.util.concurrent import LinkedBlockingQueue
+from java.util.concurrent import CopyOnWriteArrayList, LinkedBlockingQueue, TimeUnit
 
 
 NIO_GROUP = NioEventLoopGroup()
@@ -41,8 +40,55 @@ SHUT_RDWR = SHUT_RD | SHUT_WR
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
 
 
-_END_RECV_DATA = object()
+_PEER_CLOSED = object()
 
+
+
+
+class _Select(object):
+
+    def __init__(self, rlist, wlist, xlist):
+        self.cv = Condition()
+        self.rlist = frozenset(rlist)
+        self.wlist = frozenset(wlist)
+        self.xlist = frozenset(xlist)
+
+    def notify(self):
+        #print "Acquiring lock", self
+        with self.cv:
+            #print "Notifying", self
+            self.cv.notify()
+        #print "Notified", self
+
+    def __str__(self):
+        return "_Select(r={},w={},x={})".format(list(self.rlist), list(self.wlist), list(self.xlist))
+
+    def __call__(self, timeout):
+        with self.cv:
+            for sock in chain(self.rlist, self.wlist, self.xlist):
+                sock._register_selector(self)
+
+            # As usual with condition variables, we need to ensure
+            # there's not a spurious wakeup; this test also helps
+            # shortcircuit if the socket was in fact ready before the
+            # select call
+            while True:
+                # Checking if sockets are ready (readable OR writable)
+                # converts selection from detecting edges to detecting levels
+                selected_rlist = set(sock for sock in self.rlist if sock._readable())
+                selected_wlist = set(sock for sock in self.wlist if sock._writable())
+                # FIXME add support for exceptions
+                selected_xlist = []
+                #print "Checking levels for", self
+                if selected_rlist or selected_wlist:
+                    break
+                #print "Waiting on", self
+                self.cv.wait(timeout)
+                #print "Completed waiting for", self
+
+            for sock in chain(self.rlist, self.wlist, self.xlist):
+                sock._unregister_selector(self)
+            return sorted(selected_rlist), sorted(selected_wlist), sorted(selected_xlist)
 
 
 class ReadAdapter(ChannelInboundHandlerAdapter):
@@ -53,112 +99,24 @@ class ReadAdapter(ChannelInboundHandlerAdapter):
     def channelRead(self, ctx, msg):
         # put msg buffs on incoming as they come in;
         # only guarantee on recv that we receive at most bufferlen;
-        print "Got data", self.sock
+        self.sock.data_available = True
+        print "Ready for read", self.sock, msg
         msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
+        print self.sock.incoming.peek()
+        self.sock.data_available = False
+        self.sock._notify_selectors()
         ctx.fireChannelRead(msg)
-
-
-class ReadSelector(ChannelInboundHandlerAdapter):
-
-    def __init__(self, selector, sock):
-        self.selector = selector
-        self.sock = sock
-
-    def channelRead(self, ctx, msg):
-        print "Ready for read", self.sock
-        self.selector.selected_rlist.add(self.sock)
-        cv = self.selector.cv
-        with cv:
-            print "Notifying selector"
-            cv.notify()
-        print "Notified"
-        ctx.fireChannelRead(msg)
-
-
-class WriteSelector(ChannelInboundHandlerAdapter):
-
-    def __init__(self, selector, sock):
-        self.selector = selector
-        self.sock = sock
 
     def channelWritabilityChanged(self, ctx):
         print "Ready for write", self.sock
-        self.selector.selected_wlist.add(self.sock)
-        cv = self.selector.cv
-        with cv:
-            cv.notify()
+        self.sock._notify_selectors()
         ctx.fireChannelWritabilityChanged()
-
-
-class ExceptionSelector(ChannelInboundHandlerAdapter):
-
-    def __init__(self, selector, sock):
-        self.selector = selector
-        self.sock = sock
 
     def exceptionCaught(self, ctx, cause):
         print "Ready for exception", self.sock, cause
-        self.selector.selected_xlist.add(self.sock)
-        cv = self.selector.cv
-        with cv:
-            cv.notify()
+        self.sock._notify_selectors()
         ctx.fireExceptionCaught(cause) 
-
-
-class _Select(object):
-
-    def __init__(self, rlist, wlist, xlist):
-        self.cv = Condition()
-
-        # Checking if sockets are ready (readable OR writable)
-        # converts selection from detecting edges to detecting levels;
-        # Doing this check here will have the effect of immediately
-        # exiting the select loop below
-        self.selected_rlist = set(sock for sock in rlist if sock._readable())
-        self.selected_wlist = set(sock for sock in wlist if sock._writable())
-
-        # Not clear how to do level triggers on xlist, since it seems
-        # to be both poorly defined AND rarely used
-        self.selected_xlist = set()
-
-        # Connections can tell us we are writable, but they use a
-        # separate notification mechanism. We may not care, so keep
-        # intent separate from registration step below of
-        # WriteSelector. Note that peer close has similar semantics
-        # for read notification.
-        self.rlist = set(rlist)
-        self.wlist = set(wlist)
-
-        self.registered_rlist = [sock._register_handler(ReadSelector, self) for sock in rlist]
-        self.registered_wlist = [sock._register_handler(WriteSelector, self) for sock in wlist]
-        self.registered_xlist = [sock._register_handler(ExceptionSelector, self) for sock in xlist]
-
-    def unregister(self):
-        for handler in chain(self.registered_rlist, self.registered_wlist, self.registered_xlist):
-            sock = handler.sock
-            sock._unregister_handler(handler)
-
-    def __call__(self, timeout):
-        with self.cv:
-            # As usual with condition variables, we need to ensure
-            # there's not a spurious wakeup; this test also helps
-            # shortcircuit if the socket was in fact ready before the
-            # select call
-            while not (self.selected_rlist or self.selected_wlist or self.selected_xlist):
-                print "waiting on", self.registered_rlist, self.registered_wlist, self.registered_xlist
-                print "selected  ", self.selected_rlist, self.selected_wlist, self.selected_xlist
-                self.cv.wait(timeout)
-                print "Completed waiting", self
-            # Need to be in the context of the condition variable to avoid racing on unregistration
-            print "Unregistering", self
-            self.unregister()
-            print "Unregistered"
-
-        print "selected 2", self.selected_rlist, self.selected_wlist, self.selected_xlist
-        return sorted(self.selected_rlist), sorted(self.selected_wlist), sorted(self.selected_xlist)
-
-
 
 
 # FIXME how much difference between server and peer sockets?
@@ -177,23 +135,21 @@ class _socketobject(object):
         self.channel = None
         self.incoming = LinkedBlockingQueue()  # list of read buffers
         self.incoming_head = None  # allows msg buffers to be broken up
-        self.selectors = set()  # weak consistency in iteration is probably OK
+        self.selectors = CopyOnWriteArrayList()
         self.read_adapter = None
         self.can_write = True
         self.connect_handlers = []
+        self.peer_closed = False
 
-    def _register_handler(self, handler_class, selector):
-        handler = handler_class(selector, self)
-        self.channel.pipeline().addLast(handler)
-        self.selectors.add(selector)
-        return handler
+    def _register_selector(self, selector):
+        self.selectors.addIfAbsent(selector)
 
-    def _unregister_handler(self, handler):
-        # FIXME currently this ordering matters, to prevent deadlock;
-        # really should look at unifying the two types of handling
-        # below
-        self.selectors.remove(handler.selector)
-        self.channel.pipeline().remove(handler)
+    def _unregister_selector(self, selector):
+        self.selectors.remove(selector)
+
+    def _notify_selectors(self):
+        for selector in self.selectors:
+            selector.notify()
 
     def _handle_channel_future(self, future, reason):
         if self.blocking:
@@ -203,20 +159,11 @@ class _socketobject(object):
                 future.await(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
                 return future
         else:
-            # need to know if we have any registered interest - 
-            # this should signal rlist/wlist if successful, otherwise xlist,
-            # through selectors above
+            def workaround_jython_bug(x):
+                # print "Notifying selectors", self
+                self._notify_selectors()
 
-            def notify_selectors(f):
-                for selector in self.selectors:
-                    print "Selector", reason, selector.__dict__
-                    with selector.cv:
-                        if self._writable() and self in selector.wlist:
-                            selector.selected_wlist.add(self)
-                            print "Notifying connection has happened", reason, selector
-                            selector.cv.notify()
-
-            future.addListener(notify_selectors)
+            future.addListener(workaround_jython_bug)
             return future
 
     def setblocking(self, mode):
@@ -241,24 +188,16 @@ class _socketobject(object):
         # FIXME also support any options here
         future = bootstrap.connect(host, port)
         self.channel = future.channel()
-        self._handle_channel_future(future, "connect")
         if self.connect_handlers:
             self.channel.pipeline().addLast(self.read_adapter)
         
-        def say_im_closed(x):
-            # FIXME can x be an exception we would like to raise in the recv?
-            print "My channel is closed, it's pointless to keep reading", x
-            self.incoming.put(_END_RECV_DATA)
-            for selector in self.selectors:
-                print "Notifying selector (if interested)", selector
-                with selector.cv:
-                    print "Acquired selector condition", selector
-                    if self in selector.rlist:
-                        selector.selected_rlist.add(self)
-                        print "Notifying connection close by peer has happened", selector
-                        selector.cv.notify()
+        def peer_closed(x):
+            print "Peer closed channel {} {}".format(self, x)
+            self.incoming.put(_PEER_CLOSED)
+            self._notify_selectors()
 
-        self.channel.closeFuture().addListener(say_im_closed)
+        self.channel.closeFuture().addListener(peer_closed)
+        self._handle_channel_future(future, "connect")
 
     def close(self):
         future = self.channel.close()
@@ -290,7 +229,7 @@ class _socketobject(object):
 
     def _readable(self):
         return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
-                self.incoming.poll())
+                self.incoming.peek())
 
     def _writable(self):
         return self.channel.isActive() and self.channel.isWritable()
@@ -302,9 +241,10 @@ class _socketobject(object):
         # which underlies Netty's support for such channels.
         self._get_incoming_msg()
         msg = self.incoming_head
+        #print "recv msg=", msg
         if msg is None:
             return None
-        elif msg is _END_RECV_DATA:
+        elif msg is _PEER_CLOSED:
             self.incoming_head = None
             return ""
         msg_length = msg.readableBytes()
@@ -345,15 +285,12 @@ class SSLSocket(object):
         self.engine = SSLContext.getDefault().createSSLEngine()
         self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
         self.ssl_handler = SslHandler(self.engine)
+        self.ssl_writable = False
 
         def handshake_step(x):
             print "Handshaking", x
-            for selector in self.sock.selectors:
-                with selector.cv:
-                    if self in selector.wlist:
-                        selector.selected_wlist.add(self)
-                        print "Notifying connection we can write", selector
-                        selector.cv.notify()
+            self.ssl_writable = True
+            self.sock._notify_selectors()
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
 
@@ -369,6 +306,7 @@ class SSLSocket(object):
 
     def send(self, data):
         print "Sending data over SSL socket..."
+        self.ssl_writable = False  # special writability step after negotiation
         self.sock.send(data)
         print "Sent data"
 
@@ -385,13 +323,8 @@ class SSLSocket(object):
         return self.sock._readable()
 
     def _writable(self):
-        return self.sock._writable()
+        return self.ssl_writable or self.sock._writable()
 
-    def _register_handler(self, handler_class, selector):
-        return self.sock._register_handler(handler_class, selector)
-
-    def _unregister_handler(self, handler):
-        return self.sock._unregister_handler(handler)
 
 
 # helpful advice for being able to manage ca_certs outside of Java's keystore
