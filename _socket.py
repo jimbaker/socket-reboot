@@ -54,11 +54,8 @@ class _Select(object):
         self.xlist = frozenset(xlist)
 
     def notify(self):
-        #print "Acquiring lock", self
         with self.cv:
-            #print "Notifying", self
             self.cv.notify()
-        #print "Notified", self
 
     def __str__(self):
         return "_Select(r={},w={},x={})".format(list(self.rlist), list(self.wlist), list(self.xlist))
@@ -103,7 +100,6 @@ class ReadAdapter(ChannelInboundHandlerAdapter):
         print "Ready for read", self.sock, msg
         msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
-        print self.sock.incoming.peek()
         self.sock.data_available = False
         self.sock._notify_selectors()
         ctx.fireChannelRead(msg)
@@ -145,7 +141,7 @@ class _socketobject(object):
         self.selectors.addIfAbsent(selector)
 
     def _unregister_selector(self, selector):
-        self.selectors.remove(selector)
+        return self.selectors.remove(selector)
 
     def _notify_selectors(self):
         for selector in self.selectors:
@@ -175,20 +171,28 @@ class _socketobject(object):
         else:
             self.timeout = timeout
 
-    def connect(self, addr):
+    def _connect(self, addr):
         host, port = addr
         self.read_adapter = ReadAdapter(self)
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
+
+        # FIXME really this is just for SSL handling
         if self.connect_handlers:
             for handler in self.connect_handlers:
                 print "Adding connect handler", handler
                 bootstrap.handler(handler)
         else:
+            print "Adding read adapter", self.read_adapter
             bootstrap.handler(self.read_adapter)
         # FIXME also support any options here
         future = bootstrap.connect(host, port)
+        self._handle_channel_future(future, "connect")
         self.channel = future.channel()
+
+    def _post_connect(self):
+        # FIXME move into a post-connect step to handle SSL
         if self.connect_handlers:
+            print "Adding read adapter", self.read_adapter
             self.channel.pipeline().addLast(self.read_adapter)
         
         def peer_closed(x):
@@ -197,7 +201,10 @@ class _socketobject(object):
             self._notify_selectors()
 
         self.channel.closeFuture().addListener(peer_closed)
-        self._handle_channel_future(future, "connect")
+
+    def connect(self, addr):
+        self._connect(addr)
+        self._post_connect()
 
     def close(self):
         future = self.channel.close()
@@ -288,7 +295,8 @@ class SSLSocket(object):
         self.ssl_writable = False
 
         def handshake_step(x):
-            print "Handshaking", x
+            print "Handshaking result", x
+            self.sock._post_connect()
             self.ssl_writable = True
             self.sock._notify_selectors()
 
@@ -301,8 +309,7 @@ class SSLSocket(object):
 
     def connect(self, addr):
         print "Connecting SSL socket"
-        self.sock.connect(addr)
-        print "Connected"
+        self.sock._connect(addr)
 
     def send(self, data):
         print "Sending data over SSL socket..."
@@ -324,6 +331,15 @@ class SSLSocket(object):
 
     def _writable(self):
         return self.ssl_writable or self.sock._writable()
+
+    def _register_selector(self, selector):
+        self.sock._register_selector(selector)
+
+    def _unregister_selector(self, selector):
+        return self.sock._unregister_selector(selector)
+
+    def _notify_selectors(self):
+        self.sock._notify_selectors()
 
 
 

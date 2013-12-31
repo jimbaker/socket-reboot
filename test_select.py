@@ -95,7 +95,7 @@ def test_blocking_ssl_client():
         if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
             break
     print "Completed reading"
-    sys.stdout.write(data)
+    #sys.stdout.write(data)
     s.close()  # blocks
 
 
@@ -126,21 +126,23 @@ def test_nonblocking_ssl_client():
         if "Content-Length" in headers and int(headers["Content-Length"]) == len(content):
             break
     print "Completed reading"
-    sys.stdout.write(data)
+    #sys.stdout.write(data)
     s.close()
 
 
 
 def main():
     # FIXME actually make these "tests" real tests that assert results
-    # stop using python.org :) use a local CPython server instead for actual testing/compliance
+    # stop using python.org :) and even verisign.com - use a local
+    # CPython server instead for actual testing/compliance
     print "Blocking client"
-    #test_blocking_client()
+    test_blocking_client()
     print "*******\n" * 5, "Nonblocking client"
     test_nonblocking_client()
     print "*******\n" * 5, "Blocking SSL client"
-    #test_blocking_ssl_client()
-    #test_nonblocking_ssl_client()
+    test_blocking_ssl_client()
+    print "*******\n" * 5, "Nonblocking SSL client"
+    test_nonblocking_ssl_client()
 
 
 if __name__ == "__main__":
