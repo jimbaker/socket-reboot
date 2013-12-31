@@ -1,5 +1,5 @@
-# implements a spike of socket and select;
-# it should be straighforward to add support of ssl.wrap, ssl.unwrap
+# implements a spike of socket, select, and ssl support
+ 
 
 import jarray
 import sys
@@ -190,7 +190,9 @@ class _socketobject(object):
         self.channel = future.channel()
 
     def _post_connect(self):
-        # FIXME move into a post-connect step to handle SSL
+        # Post-connect step is necessary to handle SSL setup,
+        # otherwise the read adapter can race in seeing encrypted
+        # messages from the peer
         if self.connect_handlers:
             print "Adding read adapter", self.read_adapter
             self.channel.pipeline().addLast(self.read_adapter)
@@ -203,6 +205,7 @@ class _socketobject(object):
         self.channel.closeFuture().addListener(peer_closed)
 
     def connect(self, addr):
+        # Unwrapped sockets can immediately perform the post-connect step
         self._connect(addr)
         self._post_connect()
 
@@ -284,6 +287,7 @@ class SSLInitializer(ChannelInitializer):
 
 # Need a delegation wrapper just in case users of this class want to
 # access certs and other info from the underlying SSLEngine
+# FIXME we should use ABC support to make this a subtype of the socket class
 
 class SSLSocket(object):
     
@@ -302,9 +306,8 @@ class SSLSocket(object):
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
 
-        # if already connected, do this
-        # self.sock.channel.pipeline().addLast("ssl", SslHandler(self.engine))
-        # else add the SSLInitializer:
+        # FIXME presumably if already connected, do this:
+        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine)), or maybe addBefore the read_adapter
         self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def connect(self, addr):
