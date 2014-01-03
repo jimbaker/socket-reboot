@@ -88,7 +88,7 @@ class _Select(object):
             return sorted(selected_rlist), sorted(selected_wlist), sorted(selected_xlist)
 
 
-class ReadAdapter(ChannelInboundHandlerAdapter):
+class PythonInboundHandler(ChannelInboundHandlerAdapter):
 
     def __init__(self, sock):
         self.sock = sock
@@ -132,7 +132,7 @@ class _socketobject(object):
         self.incoming = LinkedBlockingQueue()  # list of read buffers
         self.incoming_head = None  # allows msg buffers to be broken up
         self.selectors = CopyOnWriteArrayList()
-        self.read_adapter = None
+        self.python_inbound_handler = None
         self.can_write = True
         self.connect_handlers = []
         self.peer_closed = False
@@ -173,7 +173,7 @@ class _socketobject(object):
 
     def _connect(self, addr):
         host, port = addr
-        self.read_adapter = ReadAdapter(self)
+        self.python_inbound_handler = PythonInboundHandler(self)
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
 
         # FIXME really this is just for SSL handling
@@ -182,8 +182,8 @@ class _socketobject(object):
                 print "Adding connect handler", handler
                 bootstrap.handler(handler)
         else:
-            print "Adding read adapter", self.read_adapter
-            bootstrap.handler(self.read_adapter)
+            print "Adding read adapter", self.python_inbound_handler
+            bootstrap.handler(self.python_inbound_handler)
         # FIXME also support any options here
         future = bootstrap.connect(host, port)
         self._handle_channel_future(future, "connect")
@@ -194,8 +194,8 @@ class _socketobject(object):
         # otherwise the read adapter can race in seeing encrypted
         # messages from the peer
         if self.connect_handlers:
-            print "Adding read adapter", self.read_adapter
-            self.channel.pipeline().addLast(self.read_adapter)
+            print "Adding read adapter", self.python_inbound_handler
+            self.channel.pipeline().addLast(self.python_inbound_handler)
         
         def peer_closed(x):
             print "Peer closed channel {} {}".format(self, x)
@@ -215,7 +215,7 @@ class _socketobject(object):
 
     def shutdown(self, how):
         if how & SHUT_RD:
-            self.channel.pipeline().remove(self.read_adapter)
+            self.channel.pipeline().remove(self.python_inbound_handler)
         if how & SHUT_WR:
             self.can_write = False
 
@@ -307,7 +307,7 @@ class SSLSocket(object):
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
 
         # FIXME presumably if already connected, do this:
-        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine)), or maybe addBefore the read_adapter
+        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine)), or maybe addBefore the python_inbound_handler
         self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def connect(self, addr):

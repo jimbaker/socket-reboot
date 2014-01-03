@@ -1,14 +1,262 @@
-Implementing the socket, select, and ssl module is non-trivial for
-Jython, given the difference between the APIs and the underlying Java
-platform. This is especially the case nonblocking support.
+Motivation
+==========
 
-This draft design doc demonstrates that we can use Netty 4 to
-implement the necessary semantics - with just a small number of
-exceptions - of these standard networking modules.
+The socket, select, and ssl modules provide the core, low-level
+networking semantics for Python. However, implementing these modules
+in their entirety is difficult for Jython given differences between
+the APIs and the underlying Java platform. This is especially true
+with respect to supporting IO completions on nonblocking
+sockets (using either select or poll) **and** SSL handshaking.
+
+This spike demonstrates that for Jython 2.7 we can use Netty 4 to
+implement these core semantics, with minor exceptions. In particular,
+this spikes looks at the implications of implementing the select
+function, which is both minimally documented and tested in Python. The
+other element addressed is the management of Netty's thread pool,
+especially with respect to cleaning up a `PySystemState`.
+
+
+Mapping Netty semantics to Python IO completions
+================================================
+
+Common usage of blocking sockets in Python is quite similar to what
+Java readily supports with blocking sockets, and Jython has long
+supported such layering. The difficulty arises with respect to
+nonblocking sockets as used with the select module:
+
+* Java's `Selectable` sockets (`SocketChannel`, `ServerSocketChannel`)
+  have a different API than blocking sockets (`Socket`,
+  `ServerSocket`). Because they are different implementations, it is
+  not possible in Java to switch from blocking to nonblocking.
+
+* No direct support for working with SSL in a nonblocking way. Java
+  supports `SSLSocket` and `SSLServerSocket`, but not a
+  `SocketChannel` variant. Instead, one has to work explicitly with
+  the SSL handshaking steps using `SSLEngine`, which does not
+  correspond to Python semantics (except perhaps with respect to
+  observability of the completions of steps by the `select`
+  function`).
+
+The current implementation in Jython 2.5 (and current Jython trunk)
+does have a socket and select implementation that works around the
+first problem, but at the cost of significant complexity in additional
+corner cases and known warts.
+
+Netty 4 allows us to sidestep both these issues seen previously in
+Jython 2.5 and add SSL. We make the following observations in this
+spike:
+
+* As should be expected, we can layer blocking functionality on a
+  common nonblocking implementation. But this is especially easy to do
+  in Netty, where blocking ops simply become a matter of waiting on a
+  `ChannelFuture`, with possible timeout.
+
+* Netty in particular mostly eliminates the need to manage any aspect
+  of SSL, excepting its setup in a channel pipeline.
+
+* The key challenge then is to implement IO completion support.
+
+
+FIXME
+=====
+
+First, we need to distinguish that Netty's completion model is
+edge-based, in other words some change has happened (perhaps). Both
+`select` and `poll` in Python are level-based: a socket is now ready
+to read, for example. However, it is easy to layer a level-based model
+on an edge-based model: simply add a test - is it ready to read? -
+after getting a notification.
+
+(Note that such testing can potentially race if multiple threads are
+say selecting and reading on the same socket. Sockets in general are
+not threadsafe this way, however.)
+
+Such tests work well with a model of using condition variables for
+such notifications, due to inherent quality of CVs that they may
+experience spurious wakeups.
+
+There are actually two types of IO completions in Netty,
+viewed from Python's perspective of what an event that would trigger
+a possible select. First
+
+
+Edge vs level
+=============
+
+select.select completes on **levels** (available for reading, etc),
+not **edges** (something has changed about the read status) of a given
+socket.
+
+With Netty, we first need to wait on edge events, as necessary, then
+determine levels. More on this momentarily.
+
+
+ChannelFuture
+--------------
+
+Such futures correspond to a discrete state transition of the channel
+- connected to peer (implies DNS lookup, if necessary); SSL has
+handshaked; a peer has closed its side of the channel. Interestingly,
+this is also used for notifying that a write has completed.
+
+
+ChannelInboundHandler
+---------------------
+
+Netty supports a pipeline for each channel, divided into inbound and outbound, where handlers on each side of the pipeline handle incoming/outgoing events. Some of these events carry messages, as wrapped in Netty's ByteBuf.
+
+
+
+Summary of select events
+------------------------
+
+ChannelInboundHandler.isWritabilityChanged -> edge event for possible writability
+Interestingly, isWritabilityChanged is an inbound event, most likely to simplify protocol handshaking.
+
+
+Detecting peer close
+--------------------
+
+In Python, `socket.recv` returns an empty string upon peer close. 
+
+ in PythonPython sockets retThis is also a ready-to-read selectable event.
+
+
+SSL handshaking and events
+--------------------------
+
+To avoid races with SSL handshaking, it is important to add the
+PythonInboundHandler *after* handshaking completes. I need some actual
+experience here, but I believe it's not necessary to manipulate the
+pipeline again in the case of SSL renegotiation - it seems to be only
+a race of reading the first handshaking (encrypted) message. To solve
+this, the listener on the handshake does this setup in a post_connect
+step.
+
+handshakeFuture
+SSL handshaking is complete. From testing, this implies the wrapped socket is in fact writable.
+
+
+
+Note that we could potentially observe the handshake process by seeing
+SSL_ERROR_WANT_READ and SSL_ERROR_WANT_WRITE exceptions in the
+SSLSocket.do_handshake() method, then requiring the user to call
+select, but this is pointless.
+
+
+
+
+
+Event unification
+=================
+
+It's straightforward to combine these two types of completions. A
+socket maintains a `CopyOnWriteArrayList` of selector listeners. (Note
+that the semantics of "weak" iteration guaranteed by
+`ConcurrentHashMap`, as used by `set` in Jython, would seem to
+suffice; but Jython actually detects a change in size of a set during
+set iteration, throwing a `RuntimeError` if seen.)
+
+
+
+In general, the pattern of using a condition variable is as follows:
+
+````python
+with cv:  # 1
+    while True:
+        result = some_test()  # 2
+	if result:
+	    return result
+        cv.wait(timeout)
+````
+
+This snippet (1) acquires the condition variable `cv` such that it
+always is released upon exit of the code block, such as a return; (2)
+ensures both a non-spurious wakeup and potentially no waiting by
+directly testing. Note that `cv.wait` immediately releases `cv`, then
+reacquires when woken up.
+
+This pattern is further extended in the case of the select mechanism,
+because we need to explicitly register and unregister. To avoid races
+of unregistration and notification, this should be always nested in
+the acquisition condition variable and the unregistration always
+performed upon exit. Having `register_selectors` be a context manager
+ensures this will be the case:
+
+````python
+with cv, register_selectors(...):
+    while True:
+        result = some_test()
+        if result:
+            return result
+        cv.wait(timeout)
+````
+
+(See [FIXME Jython concurrency chapter section][] for more details.)
+
+
+(There does not appear to be any reason to consider handlers that
+implement `ChannelOutboundHandler`)
+
+NOTES
+
+Although I only looked at `select.select`, `select.poll` appears to be
+identical from a socket's perspective. (It's up to the poll object to
+register/unregister itself.)
+
+
+
+* Channel pipelines. Users of the Netty API can insert/remove handlers in a given inbound pipeline. (This is also true of an outbound side of a pipeline, but it does not seem relevant for IO completions.)
+
+
+TBD
+===
+
+This was a limited spike:
+
+* This spike has been motivated by the need to support client-side,
+nonblocking SSL support, as needed by pip and its dependency,
+requests.
+
+**Still to be done is support for exceptions.** In particular, it is
+not clear that `select(..., ..., xlist)` is a well-defined,
+cross-platform concept for CPython. Appropriate mapping of exceptions
+for socket methods is a potential risk, but likely mitigated by the
+lack of good cross platform definition of exceptions, say Unix vs
+Windows.
+
+Note that there's no support for server sockets in this spike.  There's already an existing solution for server sockets
+without SSL, blocking or not, in Jython. However the Netty docs
+suggest that this should be straightforward (see FIXME), so we should
+not have to keep that code around.
+
+Supporting datagram (UDP) sockets has similar reasoning.
+
+
+Existing module reuse
+=====================
+
+FIXME
+From socket:
+From jython-ssl
+
+
+Mapping exceptions
+==================
+
+Need to determine how Netty 4 exposes exceptions and comparable Python
+exceptions. There's already existing work here, but it has to be
+remapped.
+
+
+Overhead
+========
+
+[bring in buffer discussion]
 
 In addition, the necessary jars we would need to add to Jython are
-minimal in size, on the order of 1 MB (no need for codes, or most of
-the transports).
+minimal in size, on the order of 1 MB, because there's no need for
+codecs or most of the transports.
 
 
 Import semantics
@@ -48,6 +296,10 @@ the JVM shutdown hook process as well as `PySystemState.cleanup` and
 Note that Bootstrap/ServerBootstrap, SSLEngine, and other resources
 are fairly lightweight, so they can be simply constructed as needed.
 
+
+Security manager considerations
+===============================
+
 In certain cases, imports of _socket and usage of Python sockets may
 fail due to security manager restrictions:
 
@@ -57,6 +309,7 @@ fail due to security manager restrictions:
 My understanding is that restricting creation of threads is fairly
 rare in containers, and would presumably be subsumed under socket
 construction.
+
 
 `socket._socketobject`
 ======================
@@ -99,7 +352,10 @@ Late binding of `socket.bind`
 
 Per these docs FIXME, the same restriction will apply for ephemeral
 sockets as in current Jython - bind is intent, not final. This is a
-fundamental limitation of Java's design.
+fundamental limitation stemming from the Java API design separating
+server sockets from client sockets, unlike how they are exposed in a C
+API.
+
 
 
 Implementing `socket.send`, `socket.sendall`
@@ -306,6 +562,9 @@ the existing implementation or my [experimental branch][] (eg peer
 certificate introspection).
 
 
+select.poll.
+
+
 Still to be resolved
 ====================
 
@@ -324,9 +583,16 @@ Still to be resolved
 
 * I do not think this applies: 
 
+My reading of
+http://docs.python.org/2/library/socket.html#socket.socket.settimeout
+
+is that this is not a shortcut for setting a socket option SO_TIMEOUT,
+but instead corresponds to "await timeout".
+
      * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
      * http://netty.io/4.0/api/io/netty/channel/ChannelFuture.html 
        "Do not confuse I/O timeout and await timeout"
+
 
 
 Effiency considerations
