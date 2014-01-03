@@ -21,6 +21,32 @@ FIXME there are some other things we look at architecturally; also
 significant carryover of other functionality from previous work.
 
 
+What was not covered
+====================
+
+This has intentionally been a limited [FIXME spike][], which is a
+generally good thing to do with spikes.
+
+In particular, the milestone for releasing Jython 2.7 beta 2 is to
+support pip, which in turn requires support for requests, which in
+turn is blocking on nonblocking SSL support for peer (client) sockets.
+
+So this means there's no support for server sockets in this spike;
+however I did some [FIXME quick analysis][] of the Netty docs that
+suggests this support should be straightforward. Although this should
+not be necessary, there's an existing solution in Jython trunk for
+server sockets without SSL, blocking or not.
+
+Supporting datagram (UDP) sockets has similar reasoning.
+
+**Still to be done is support for exceptions.** In particular, it is
+not clear that `select(..., ..., xlist)` is a well-defined,
+cross-platform concept for CPython. Appropriate mapping of exceptions
+for socket methods is a potential risk, but likely mitigated by the
+lack of good cross platform definition of exceptions, say Unix vs
+Windows.
+
+
 Mapping Python socket semantics to Java
 =======================================
 
@@ -94,6 +120,12 @@ There are actually two types of IO completions in Netty:
   carry messages, as wrapped in Netty's ByteBuf. In particular, we are
   interested in `ChannelInboundHandler`.
 
+The reason for distinction in Netty is that it's both incredibly
+useful to have explicit pipelines and it also avoids additional
+synchronization overhead when going from one handler to
+another. Fortunately for our purposes, it really doesn't matter that
+this division exists.
+
 
 Specific mapping
 ================
@@ -106,8 +138,8 @@ Edge event                   | Notes
 ---------------------------- | -----
 Bootstrap.connect            |
 socket.close                 |
-socket.send                  | Is this really an edge event?
 CIH.channelRead              |
+socket.send                  | Is this really an edge event?
 CIH.exceptionCaught          |
 CIH.isWritabilityChanged     |
 SocketChannel.closeFuture    | recv will see an empty string (sentinel for peer close)
@@ -116,17 +148,18 @@ SSLHandler.handshakeFuture   | Also initiates post-connect phase that sets up Py
 (CIH = ChannelInboundHandler)
 
 Notification from socket to selector is straightforward. Each socket
-manages a list of listeners (selector, registered poll objects) using
-a `CopyOnWriteArrayList`; normally we would expect a size of no more
-than 1, but Python select/poll semantics do allow multiple listeners.
+manages a [FIXME list of listeners] (selector, registered poll
+objects) using a `CopyOnWriteArrayList`; normally we would expect a
+size of no more than 1, but Python select/poll semantics do allow
+multiple listeners.
 
-The [usual pattern][] of working with a condition variable is further
-extended in the case of the select mechanism, because we need to
-explicitly register and unregister. To avoid races of unregistration
-and notification, this should be always nested in the acquisition
-condition variable and the unregistration always performed upon
-exit. Having `register_selectors` be a context manager ensures this
-will be the case:
+The [FIXME usual pattern][] of working with a condition variable is
+further extended in the case of the select mechanism, because we need
+to explicitly register and unregister selectors. To avoid races of
+unregistration and notification, this should be always nested in the
+acquisition condition variable and the unregistration always performed
+upon exit. Having `register_selectors` be a context manager (to be
+implemented) ensures this will be the case:
 
 ````python
 with cv, register_selectors(...):
@@ -137,7 +170,6 @@ with cv, register_selectors(...):
         cv.wait(timeout)
 ````
 
-(See [FIXME Jython concurrency chapter section][] for more details.)
 
 
 
@@ -158,29 +190,6 @@ Note that we could potentially observe the handshake process by seeing
 select, but this is pointless.
 
 
-
-TBD
-===
-
-This was a limited spike:
-
-* This spike has been motivated by the need to support client-side,
-nonblocking SSL support, as needed by pip and its dependency,
-requests.
-
-**Still to be done is support for exceptions.** In particular, it is
-not clear that `select(..., ..., xlist)` is a well-defined,
-cross-platform concept for CPython. Appropriate mapping of exceptions
-for socket methods is a potential risk, but likely mitigated by the
-lack of good cross platform definition of exceptions, say Unix vs
-Windows.
-
-Note that there's no support for server sockets in this spike.  There's already an existing solution for server sockets
-without SSL, blocking or not, in Jython. However the Netty docs
-suggest that this should be straightforward (see FIXME), so we should
-not have to keep that code around.
-
-Supporting datagram (UDP) sockets has similar reasoning.
 
 
 Existing module reuse
@@ -322,8 +331,10 @@ nonblocking sockets TBD).
 Read handler, notify any blocking reads; make data available to the socket.
 
 
+Server socket support
+=====================
+
 Implementing `socket.accept`
-============================
 
 Netty's ServerSocketChannel objects use a [child handler][] to setup
 newly created child sockets. This child handler can readily put on a
@@ -488,12 +499,6 @@ Such code will never see `ssl.SSL_ERROR_WANT_READ` and
 correct.
 
 
-UDP/datagram support
-====================
-
-FIXME - available in Netty 4 - apparently this is one advantage over
-Async*Channel. Apparently async datagram channel support slipped to
-Java 8.
 
 
 Exceptions
@@ -512,59 +517,23 @@ the existing implementation or my [experimental branch][] (eg peer
 certificate introspection).
 
 
-select.poll.
 
-
-Still to be resolved
-====================
-
-* Jython currently does not support selectable files. However, Netty
-  (and the underlying Java platform, I believe this may require NIO2,
-  which is part of Java 7), now does support completions on
-  files. However, this would require revisiting our own implementation
-  of Python New IO. Lastly, JRuby now supports [selectable stdin][],
-  but presumably this requires bolting in a suitable stdin plugin for
-  this functionality into Netty.
-
-* Supporting raw sockets. Presumably this could be done with something
-  like RockSaw (http://www.savarese.com/software/rocksaw/, Apache
-  licensed), but does not appear to be immediately pluggable into
-  Netty.
-
-* I do not think this applies: 
-
-My reading of
-http://docs.python.org/2/library/socket.html#socket.socket.settimeout
-
-is that this is not a shortcut for setting a socket option SO_TIMEOUT,
-but instead corresponds to "await timeout".
-
-     * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
-     * http://netty.io/4.0/api/io/netty/channel/ChannelFuture.html 
-       "Do not confuse I/O timeout and await timeout"
-
-
-
-Effiency considerations
-=======================
-
-Given how Netty pipelines and that all operations are done with
-respect to ByteBuf, it's likely that there would be little benefit in
-translating to Java, except for perhaps a couple of hot spots.
-
-Copying between ByteBuf and PyString introduces unfortunate overhead
-and extra allocation costs. `socket.recv_into` probably doesn't help,
-given the differences between the buffer API and ByteBuf.
 
 
 Notes
 =====
+
+`ConcurrentHashMap`
+-------------------
 
 Jython backs `set` with a `ConcurrentHashMap`. Although the semantics
 of weakly consistent iteration of CHM is sufficient for notification,
 Jython actually follows what CPython does and will detect a change in
 size of a set during set iteration, throwing a `RuntimeError` if seen.
 
+
+`Condition variable`
+--------------------
 
 In general, the pattern of using a condition variable is as follows:
 
@@ -582,6 +551,77 @@ always is released upon exit of the code block, such as a return; (2)
 ensures both a non-spurious wakeup and potentially no waiting by
 directly testing. Note that `cv.wait` immediately releases `cv`, then
 reacquires when woken up.
+
+(See [FIXME Jython concurrency chapter section][] for more details.)
+
+
+Effiency considerations
+-----------------------
+
+Given how Netty pipelines and that all operations are done with
+respect to ByteBuf, it's likely that there would be little benefit in
+translating to Java, except for perhaps a couple of hot spots.
+
+Copying between ByteBuf and PyString introduces unfortunate overhead
+and extra allocation costs. `socket.recv_into` probably doesn't help,
+given the differences between the buffer API and ByteBuf.
+
+
+`SO_TIMEOUT`
+------------
+
+* I do not think this applies: 
+
+My reading of
+http://docs.python.org/2/library/socket.html#socket.socket.settimeout
+
+is that this is not a shortcut for setting a socket option SO_TIMEOUT,
+but instead corresponds to "await timeout".
+
+     * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
+     * http://netty.io/4.0/api/io/netty/channel/ChannelFuture.html 
+       "Do not confuse I/O timeout and await timeout"
+
+
+High priority
+-------------
+
+Maybe in Java 8?
+
+
+
+UDP/datagram support
+--------------------
+
+FIXME - available in Netty 4 - apparently this is one advantage over
+Async*Channel. Apparently async datagram channel support slipped to
+Java 8.
+
+
+Selectable files
+-----------------
+
+Jython currently does not support selectable files. However, Netty
+(and the underlying Java platform, I believe this may require NIO2,
+which is part of Java 7), now does support completions on
+files. However, this would require revisiting our own implementation
+of Python New IO. Lastly, JRuby now supports [selectable stdin][], but
+presumably this requires bolting in a suitable stdin plugin for this
+functionality into Netty.
+
+
+Unix domain sockets
+-------------------
+
+Java native runtime project
+
+
+Raw sockets
+-----------
+
+Supporting raw sockets. Presumably this could be done with something
+like RockSaw (http://www.savarese.com/software/rocksaw/, Apache
+licensed), but does not appear to be immediately pluggable into Netty.
 
 
 <!-- references -->
