@@ -9,13 +9,13 @@ especially true with respect to supporting IO completions on
 nonblocking sockets (using either select or poll) **and** SSL
 handshaking.
 
-This spike demonstrates that for Jython 2.7 we can use Netty 4 to
-readily implement these core semantics, with minor exceptions. In
-particular, this spike mostly looks at the implications of
-implementing the select function, which is both minimally documented
-and tested in Python. The other element addressed is the management of
-Netty's thread pool, especially with respect to cleaning up a
-`PySystemState`.
+This spike demonstrates with **working code** that for Jython 2.7 we
+can use Netty 4 to readily implement these core semantics, with minor
+exceptions. In particular, this spike mostly looks at the implications
+of implementing the select function, which is both minimally
+documented and tested in Python. The other element addressed is the
+management of Netty's thread pool, especially with respect to cleaning
+up a `PySystemState`.
 
 FIXME there are some other things we look at architecturally; also
 significant carryover of other functionality from previous work.
@@ -177,7 +177,7 @@ SSL handshaking and events
 --------------------------
 
 To avoid races with SSL handshaking, it is important to add the
-`PythonInboundHandler` **after* handshaking completes. I need some
+`PythonInboundHandler` **after** handshaking completes. I need some
 actual experience here, but I believe it's not necessary to manipulate
 the pipeline again in the case of SSL renegotiation - it seems to be
 only a race of reading the first handshaking (encrypted) message. To
@@ -270,10 +270,13 @@ rare in containers, and would presumably be subsumed under socket
 construction.
 
 
-`socket._socketobject`
-======================
+Class emulation
+===============
 
-Wraps channels and all necessary operations. FIXME
+FIXME
+
+* `socket._socketobject` - Wraps channels and all necessary operations
+* SSLSocket
 
 
 Unification of blocking/nonblocking socket support
