@@ -4,6 +4,7 @@
 import jarray
 import sys
 import time
+from contextlib import contextmanager
 from itertools import chain
 from threading import Condition
 
@@ -60,15 +61,17 @@ class _Select(object):
     def __str__(self):
         return "_Select(r={},w={},x={})".format(list(self.rlist), list(self.wlist), list(self.xlist))
 
-    def __call__(self, timeout):
-        with self.cv:
-            for sock in chain(self.rlist, self.wlist, self.xlist):
-                sock._register_selector(self)
+    @contextmanager
+    def _register_selectors(self, socks):
+        for sock in socks:
+            sock._register_selector(self)
+        yield self
+        for sock in socks:
+            sock._unregister_selector(self)
 
-            # As usual with condition variables, we need to ensure
-            # there's not a spurious wakeup; this test also helps
-            # shortcircuit if the socket was in fact ready before the
-            # select call
+    def __call__(self, timeout):
+        with self.cv, self._register_selectors(chain(self.rlist, self.wlist, self.xlist)):
+
             while True:
                 # Checking if sockets are ready (readable OR writable)
                 # converts selection from detecting edges to detecting levels
@@ -77,14 +80,17 @@ class _Select(object):
                 # FIXME add support for exceptions
                 selected_xlist = []
                 #print "Checking levels for", self
+
+                # As usual with condition variables, we need to ensure
+                # there's not a spurious wakeup; this test also helps
+                # shortcircuit if the socket was in fact ready for
+                # reading/writing/exception before the select call
                 if selected_rlist or selected_wlist:
                     break
                 #print "Waiting on", self
                 self.cv.wait(timeout)
                 #print "Completed waiting for", self
 
-            for sock in chain(self.rlist, self.wlist, self.xlist):
-                sock._unregister_selector(self)
             return sorted(selected_rlist), sorted(selected_wlist), sorted(selected_xlist)
 
 
@@ -136,6 +142,8 @@ class _socketobject(object):
         self.can_write = True
         self.connect_handlers = []
         self.peer_closed = False
+
+
 
     def _register_selector(self, selector):
         self.selectors.addIfAbsent(selector)
