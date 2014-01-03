@@ -29,9 +29,9 @@ def _shutdown_threadpool():
 # called; this includes in the event of sigterm
 sys.registerCloser(_shutdown_threadpool)
 
-# Keep the highest possible precision from converting from Python's
-# use of floating point for time intervals to Java's use of a long and
-# a specific unit, in this case TimeUnit.NANOSECONDS
+# Keep the highest possible precision for converting from Python's use
+# of floating point for durations to Java's use of both a long
+# duration and a specific unit, in this case TimeUnit.NANOSECONDS
 TO_NANOSECONDS = 1000000000
 
 

@@ -22,7 +22,7 @@ significant carryover of other functionality from previous work.
 
 
 Mapping Python socket semantics to Java
-================================================
+=======================================
 
 Common usage of blocking sockets in Python is quite similar to what
 Java readily supports with blocking sockets; consequently Jython has
@@ -98,16 +98,47 @@ There are actually two types of IO completions in Netty:
 Specific mapping
 ================
 
-Rather than directly map to be ready-to-read, we signal one condition variable, then test levels:
+Rather than directly map to be ready-to-read/ready-to-write/error
+state, notify condition variable for selector, then test levels in the
+selector:
 
-Edge event | Notes
------------+------
-Bootstrap.connect |
-socket.close |
-socket.send | Is this really an edge event?
-ChannelInboundHandler.isWritabilityChanged(...) |
-SocketChannel.closeFuture() | recv will see an empty string (sentinel for peer close)
-SSLHandler.handshakeFuture() | Also initiates post-connect phase that sets up PythonInboundHandler
+Edge event                   | Notes
+---------------------------- | -----
+Bootstrap.connect            |
+socket.close                 |
+socket.send                  | Is this really an edge event?
+CIH.channelRead              |
+CIH.exceptionCaught          |
+CIH.isWritabilityChanged     |
+SocketChannel.closeFuture    | recv will see an empty string (sentinel for peer close)
+SSLHandler.handshakeFuture   | Also initiates post-connect phase that sets up PythonInboundHandler
+
+(CIH = ChannelInboundHandler)
+
+Notification from socket to selector is straightforward. Each socket
+manages a list of listeners (selector, registered poll objects) using
+a `CopyOnWriteArrayList`; normally we would expect a size of no more
+than 1, but Python select/poll semantics do allow multiple listeners.
+
+The [usual pattern][] of working with a condition variable is further
+extended in the case of the select mechanism, because we need to
+explicitly register and unregister. To avoid races of unregistration
+and notification, this should be always nested in the acquisition
+condition variable and the unregistration always performed upon
+exit. Having `register_selectors` be a context manager ensures this
+will be the case:
+
+````python
+with cv, register_selectors(...):
+    while True:
+        result = some_test()
+        if result:
+            return result
+        cv.wait(timeout)
+````
+
+(See [FIXME Jython concurrency chapter section][] for more details.)
+
 
 
 SSL handshaking and events
@@ -126,66 +157,6 @@ Note that we could potentially observe the handshake process by seeing
 `SSLSocket.do_handshake()` method, then requiring the user to call
 select, but this is pointless.
 
-
-Event unification
-=================
-
-It's straightforward to combine these two types of completions. A
-socket maintains a `CopyOnWriteArrayList` of selector listeners. (Note
-that the semantics of "weak" iteration guaranteed by
-`ConcurrentHashMap`, as used by `set` in Jython, would seem to
-suffice; but Jython to model what is done in CPython will detect a
-change in size of a set during set iteration, throwing a
-`RuntimeError` if seen.)
-
-In general, the pattern of using a condition variable is as follows:
-
-````python
-with cv:  # 1
-    while True:
-        result = some_test()  # 2
-	if result:
-	    return result
-        cv.wait(timeout)
-````
-
-This snippet (1) acquires the condition variable `cv` such that it
-always is released upon exit of the code block, such as a return; (2)
-ensures both a non-spurious wakeup and potentially no waiting by
-directly testing. Note that `cv.wait` immediately releases `cv`, then
-reacquires when woken up.
-
-This pattern is further extended in the case of the select mechanism,
-because we need to explicitly register and unregister. To avoid races
-of unregistration and notification, this should be always nested in
-the acquisition condition variable and the unregistration always
-performed upon exit. Having `register_selectors` be a context manager
-ensures this will be the case:
-
-````python
-with cv, register_selectors(...):
-    while True:
-        result = some_test()
-        if result:
-            return result
-        cv.wait(timeout)
-````
-
-(See [FIXME Jython concurrency chapter section][] for more details.)
-
-
-(There does not appear to be any reason to consider handlers that
-implement `ChannelOutboundHandler`)
-
-NOTES
-
-Although I only looked at `select.select`, `select.poll` appears to be
-identical from a socket's perspective. (It's up to the poll object to
-register/unregister itself.)
-
-
-
-* Channel pipelines. Users of the Netty API can insert/remove handlers in a given inbound pipeline. (This is also true of an outbound side of a pipeline, but it does not seem relevant for IO completions.)
 
 
 TBD
@@ -584,6 +555,33 @@ translating to Java, except for perhaps a couple of hot spots.
 Copying between ByteBuf and PyString introduces unfortunate overhead
 and extra allocation costs. `socket.recv_into` probably doesn't help,
 given the differences between the buffer API and ByteBuf.
+
+
+Notes
+=====
+
+Jython backs `set` with a `ConcurrentHashMap`. Although the semantics
+of weakly consistent iteration of CHM is sufficient for notification,
+Jython actually follows what CPython does and will detect a change in
+size of a set during set iteration, throwing a `RuntimeError` if seen.
+
+
+In general, the pattern of using a condition variable is as follows:
+
+````python
+with cv:  # 1
+    while True:
+        result = some_test()  # 2
+	if result:
+	    return result
+        cv.wait(timeout)
+````
+
+This snippet (1) acquires the condition variable `cv` such that it
+always is released upon exit of the code block, such as a return; (2)
+ensures both a non-spurious wakeup and potentially no waiting by
+directly testing. Note that `cv.wait` immediately releases `cv`, then
+reacquires when woken up.
 
 
 <!-- references -->
