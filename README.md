@@ -121,7 +121,7 @@ There are actually two types of IO completions in Netty:
   interested in `ChannelInboundHandler`.
 
 The reason for distinction in Netty is that it's both incredibly
-useful to have explicit pipelines and it also avoids additional
+useful to have explicit pipelines, and it also avoids additional
 synchronization overhead when going from one handler to
 another. Fortunately for our purposes, it really doesn't matter that
 this division exists.
@@ -155,22 +155,22 @@ multiple listeners.
 
 The [FIXME usual pattern][] of working with a condition variable is
 further extended in the case of the select mechanism, because we need
-to explicitly register and unregister selectors. To avoid races of
-unregistration and notification, this should be always nested in the
-acquisition condition variable and the unregistration always performed
-upon exit. Having `register_selectors` be a context manager (to be
-implemented) ensures this will be the case:
+to explicitly register and unregister the selector for each socket. To
+avoid races of unregistration and notification, this should be always
+nested in the acquisition of condition variable and the unregistration
+always performed upon exit. Having `register_selectors` be a context
+manager ensures this is the case:
 
 ````python
-with cv, register_selectors(...):
-    while True:
-        result = some_test()
-        if result:
-            return result
-        cv.wait(timeout)
+with self.cv, self._register_sockets(chain(self.rlist, self.wlist, self.xlist)):
+  while True:
+    selected_rlist = set(sock for sock in self.rlist if sock._readable())
+    selected_wlist = set(sock for sock in self.wlist if sock._writable())
+    selected_xlist = []  # FIXME need to determine exception support
+    if selected_rlist or selected_wlist:
+      return sorted(selected_rlist), sorted(selected_wlist), sorted(selected_xlist)
+    self.cv.wait(timeout)
 ````
-
-
 
 
 SSL handshaking and events
@@ -190,6 +190,36 @@ Note that we could potentially observe the handshake process by seeing
 select, but this is pointless.
 
 
+Implementing `poll`
+===================
+
+The select module defines a `poll` object, which supports more
+efficient complementions than the `select` function. This spike didn't
+look at specific coding of `poll`, but it appears to be straightforward:
+
+Construct a `poll` object as usual with `select.poll()`; it has the
+following aspects:
+
+* A blocking queue used to collect polling events of the desired
+  type. As with `select`, this will be for levels.
+
+* `poll.register` registers this selector for a given socket. The
+  selector in turn is edge notified and checks for any registered
+  levels. Unlike `select`, we need a selector *for each* socket to
+  maintain O(1) behavior.
+
+* `poll.unregister` simply removes the poll selector from the list of
+  selectors for a socket, returning `KeyError` if not in the list.
+
+* `poll.poll` - poll the blocking queue for any events with an
+  appropriate timeout (specified in milliseconds), include zero
+  (default).
+
+To be determined is the possibility of supporting `POLLPRI`; other
+events are straightforward.
+
+The remaining complication is that `poll` works with file descriptors,
+not sockets. See the notes.
 
 
 Existing module reuse
@@ -218,14 +248,21 @@ minimal in size, on the order of 1 MB, because there's no need for
 codecs or most of the transports.
 
 
-Import semantics
+Potential issues
 ================
 
+Import namespace
+----------------
+
 For now, we will assume that this new work is written in Python, using
-Java (aka, pure Jython). Because of the use of Jar Jar Links, use of
-the io.netty namespace may be in org.python.io.netty; we simply do the
-following in an underlying _socket support module to pull in the Netty
-namespace:
+Java (aka, pure Jython). In the ant build, Jython uses the Jar Jar
+Links tool to rerite Java namespaces to avoid potential conflicts with
+certain containers, however, this rewriting does not take in account
+any using Python code. In particular, this means that use of the
+io.netty namespace may actually be in org.python.io.netty.
+
+Supporting either is simple: simple do the following in an underlying
+_socket support module to pull in the Netty namespace:
 
 ````python
 try:
@@ -234,30 +271,42 @@ except ImportError:
     import io.netty as netty
 ````
 
-Netty uses a `ThreadPoolGroup` to manage channels (including SSLEngine
-tasks) and the corresponding event loop. Each group is connected with
-the Bootstrap factory, which manages socket options. So _socket will
-also instantiate a common `NioThreadPoolGroup` (possibly both worker
-and boss) for all subsequent operations.
+
+Thread pools
+------------
+
+The next potential issue is that Netty uses a `ThreadPoolGroup` to
+manage channels (including SSLEngine tasks) and the corresponding
+event loop. Each group is connected with the Bootstrap factory, which
+manages socket options. So _socket will also instantiate a common
+`NioThreadPoolGroup` (possibly both worker and boss) for all
+subsequent operations.
  
-_socket should use sys.registerCloser(callback) to register a callback
-hook that does `group.shutdown()`; note this is a deprecated method,
-but `shutdownGracefully()` takes too long. In general, we should
-expect code that is using sockets has done some sort of graceful
-shutdown at the app level and any produced errors will demonstrate
-where this code has not in fact done so. Given that the thread pool is
-composed of daemon threads, this is likely not an issue regardless.
+In general, Jython avoids creating any threads except those that are
+user creating. (The one current exception is the use of
+`Runtime.addShutdownHook.) This is in part because threads can cause
+issues with class unloading.
+
+However, this is straightforward to mitigate. _socket should use
+`sys.registerCloser(callback)` to register a callback hook that does
+`group.shutdown()`; note this is a deprecated method, but
+`shutdownGracefully()` takes too long. In general, we should expect
+code that is using sockets has done some sort of graceful shutdown at
+the app level and any produced errors will demonstrate where this code
+has not in fact done so. Given that the thread pool is composed of
+daemon threads, this is likely not an issue regardless.
 
 `sys` is equivalent to `PySystemState`; this cleanup is called by both
 the JVM shutdown hook process as well as `PySystemState.cleanup` and
 `PythonInterpreter.cleanup`.
 
 Note that Bootstrap/ServerBootstrap, SSLEngine, and other resources
-are fairly lightweight, so they can be simply constructed as needed.
+are fairly lightweight, so they can be simply constructed as needed;
+they will be collected as usual.
 
 
 Security manager considerations
-===============================
+-------------------------------
 
 In certain cases, imports of _socket and usage of Python sockets may
 fail due to security manager restrictions:
@@ -270,13 +319,6 @@ rare in containers, and would presumably be subsumed under socket
 construction.
 
 
-Class emulation
-===============
-
-FIXME
-
-* `socket._socketobject` - Wraps channels and all necessary operations
-* SSLSocket
 
 
 Unification of blocking/nonblocking socket support
@@ -294,20 +336,6 @@ lack of SSL.
 
 So unification will be a big win.
 
-To implement, we will use Netty's inherent support of asynchrony for
-nonblocking support, then layer blocking support on as follows:
-
-* Many operations in Netty return a `ChannelFuture`; to block, simply
-  use `future.sync()`. A state variable in the Python socket wrapper
-  can dictate.
-
-* Other operations, notably read, use a `ChannelHandler`. This handler
-  can simply notify a condition variable in the corresponding Python
-  socket wrapper. (We do need to ensure that there is no race
-  condition if a read is in progress, and the socket is switched from
-  nonblocking to blocking, although this seems like a pathological
-  case regardless.)
-
 
 Late binding of `socket.bind`
 =============================
@@ -319,6 +347,13 @@ server sockets from client sockets, unlike how they are exposed in a C
 API.
 
 
+Class emulation
+===============
+
+FIXME
+
+* `socket._socketobject` - Wraps channels and all necessary operations
+* SSLSocket
 
 Implementing `socket.send`, `socket.sendall`
 ============================================
@@ -391,68 +426,6 @@ Some notes:
   translatable to Netty.
 
 
-`select.select`
-===============
-
-Need to adapt ChannelHandler events to appropriate readable, writable,
-exception lists in `select.select`:
-
-* Ready for reading by collecting `channelRead`
-* Ready for writing can detect by triggering on:
-
-     1. `channelWritabilityChanged`
-     2. and checking whether `Channel.isWritable()`
-
-* Errors by collecting with `exceptionCaught`
-
-Collection works as follows:
-
-A given `select.select` registers an addFirst handler for each channel
-on its pipeline (presumes the usual convention - and way to write
-bug-free socket code! - that there is not a large number of selects
-concurrently watching every socket, but instead this is
-partitioned). addFirst ensures that select will always be triggered,
-and allows for simple propagation through the pipeline for any other
-handlers (such propagation is a must).
-
-(Do we really want addFirst? It may be possible that such things as
-SSL may consume the pipeline, so we may want addLast. Regardless, the
-pipeline is completely controlled by the Jython implementation.)
-
-The handler knows the corresponding select object and can write to it.
-
-Notification is via a `ConcurrentSkipListSet` per read/write/error
-(choice of this set is to keep similar natural ordering semantics to
-CPython and of course support concurrent completions). Notification
-also triggers a condition variable associated with the select
-object. The original `select.select` wakes up, then removes all
-handlers from each channel pipeline, and then returns to the calling
-function, listifying the sets. (Does the original order of file
-descriptors have to be maintained?)
-
-http://netty.io/4.0/api/io/netty/channel/ChannelInboundHandlerAdapter.html#channelRead(io.netty.channel.ChannelHandlerContext, java.lang.Object)
-
- http://netty.io/4.0/api/io/netty/channel/ChannelInboundHandlerAdapter.html#channelWritabilityChanged(io.netty.channel.ChannelHandlerContext)
-
-http://netty.io/4.0/api/io/netty/channel/ChannelInboundHandlerAdapter.html#exceptionCaught(io.netty.channel.ChannelHandlerContext, java.lang.Throwable)
-
-
-`select.poll`
-=============
-
-Construct a `poll` object as usual with `select.poll()`; then
-
-* `poll.register` - use the same events (channelRead,
-  channelWritabilityChanged, exceptionCaught) as `select.select`, but
-  add handlers that enqueue such events to a LinkedBlockingQueue for
-  the `poll` object. It's not clear if we need to combine events
-  together for the same file descriptor - probably not.
-
-* `poll.unregister` - check for `NoSuchElementException` when using
-  `pipeline.remove(handler)`, convert to Python's `KeyError`
-
-* `poll.poll` - poll the blocking queue with an appropriate timeout,
-  include zero (default).
 
 
 `ssl.unwrap`
@@ -625,6 +598,30 @@ Raw sockets
 Supporting raw sockets. Presumably this could be done with something
 like RockSaw (http://www.savarese.com/software/rocksaw/, Apache
 licensed), but does not appear to be immediately pluggable into Netty.
+
+
+File descriptors for sockets
+----------------------------
+
+`socket.fileno()` returns a file descriptor, and this is used with
+`poll` in particular. However, a file descriptor is not really a
+meaningful concept in Java, so it seems most straightforward to simply
+return the socket object itself. (Note that file descriptors in the
+previous Jython implementation are objects, of type
+`org.python.core.io.SocketIO`.) The alternative is to maintain a weap
+bidrectional map of integers to sockets, which seems both pointless
+and a lot of work.
+
+(Bidirectional map is necessary to go from fd to socket, for poll
+support above; and to go the reverse direction to support
+`fileno()`. It must be weak with respect to any sockets to ensure GC
+can happen of sockets.)
+
+Likewise `fromfd` is not really a meaningful concept for Java, so it
+should not be made available. See for example one interesting use
+case:
+https://forrst.com/posts/Sharing_Sockets_Across_Processes_in_Python-46s
+- this is much like working with `fork`, another non Java concept.
 
 
 <!-- references -->
