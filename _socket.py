@@ -95,13 +95,8 @@ class PythonInboundHandler(ChannelInboundHandlerAdapter):
         self.sock = sock
 
     def channelRead(self, ctx, msg):
-        # put msg buffs on incoming as they come in;
-        # only guarantee on recv that we receive at most bufferlen;
-        self.sock.data_available = True
-        print "Ready for read", self.sock, msg
         msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
-        self.sock.data_available = False
         self.sock._notify_selectors()
         ctx.fireChannelRead(msg)
 
@@ -222,23 +217,6 @@ class _socketobject(object):
         if how & SHUT_WR:
             self.can_write = False
 
-    def send(self, data):
-        if not self.can_write:
-            raise Exception("Cannot write to closed socket")  # FIXME use actual exception
-        future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
-        self._handle_channel_future(future, "send")
-    
-    def _get_incoming_msg(self):
-        if self.incoming_head is not None:
-            return
-        if self.blocking:
-            if self.timeout is None:
-                self.incoming_head = self.incoming.take()
-            else:
-                self.incoming_head = self.incoming.poll(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
-        else:
-            self.incoming_head = self.incoming.poll()
-        return
 
     def _readable(self):
         return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
@@ -247,18 +225,37 @@ class _socketobject(object):
     def _writable(self):
         return self.channel.isActive() and self.channel.isWritable()
 
+    def send(self, data):
+        if not self.can_write:
+            raise Exception("Cannot write to closed socket")  # FIXME use actual exception
+        future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
+        self._handle_channel_future(future, "send")
+    
+    def _get_incoming_msg(self):
+        if self.incoming_head is None:
+            if self.blocking:
+                if self.timeout is None:
+                    self.incoming_head = self.incoming.take()
+                else:
+                    self.incoming_head = self.incoming.poll(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
+            else:
+                self.incoming_head = self.incoming.poll()  # Could be None
+
+        # Only return _PEER_CLOSED once
+        msg = self.incoming_head
+        if msg is _PEER_CLOSED:
+            self.incoming_head = None
+        return msg
+
     def recv(self, bufsize, flags=0):
         # For obvious reasons, concurrent reads on the same socket
         # have to be locked; I don't believe it is the job of recv to
         # do this; in particular this is the policy of SocketChannel,
         # which underlies Netty's support for such channels.
-        self._get_incoming_msg()
-        msg = self.incoming_head
-        #print "recv msg=", msg
+        msg = self._get_incoming_msg()
         if msg is None:
             return None
         elif msg is _PEER_CLOSED:
-            self.incoming_head = None
             return ""
         msg_length = msg.readableBytes()
         buf = jarray.zeros(min(msg_length, bufsize), "b")

@@ -106,7 +106,7 @@ spike:
 Implementing IO completions
 ===========================
 
-First, Netty's completion model is usually **edge-based**, in other
+First, Netty's completion model is generally **edge-based**, in other
 words some change has happened (perhaps). In contrast, Python's
 `select` and `poll` are **level-based**: a socket is now ready to
 read, for example. However, it is easy to layer a level-based model on
@@ -238,20 +238,89 @@ The remaining complication is that `poll` works with [FIXME file
 descriptors][], not sockets.
 
 
+Writing to the socket
+=====================
 
-Implementing `socket.send`, `socket.sendall`
-============================================
+FIXME
 
 `socket.send` needs to take into account isWritable; `socket.sendall`
 simply blocks accordingly (I don't believe this makes any sense for
 nonblocking sockets TBD).
 
 
-`socket.recv`
-=============
+Reading from the socket
+=======================
 
-Read handler, notify any blocking reads; make data available to the socket.
+Netty does not directly support reading from a socket, as needed by
+`socket.recv`. Instead any code needs to override
+`ChannelInboundHandler.channelRead`, then do something with the
+received message:
 
+````python
+    def channelRead(self, ctx, msg):
+        msg.retain()  # bump ref count so it can be used in the blocking queue
+        self.sock.incoming.put(msg)
+        self.sock._notify_selectors()
+        ctx.fireChannelRead(msg)
+````
+
+In particular, each socket in this emulation has an incoming queue (a
+`java.util.concurrent.LinkedBlockingQueue`) which buffers any read
+messages. The one complexity in Netty is that messages are `ByteBuff`,
+which is reference counted by Netty.
+
+This makes `socket.recv` reasonably simple, with three cases to be
+handled:
+
+````python
+    def recv(self, bufsize, flags=0):
+        msg = self._get_incoming_msg()
+        if msg is None:
+            return None
+        elif msg is _PEER_CLOSED:
+            return ""
+        msg_length = msg.readableBytes()
+        buf = jarray.zeros(min(msg_length, bufsize), "b")
+        msg.readBytes(buf)
+        if msg.readableBytes() == 0:
+            msg.release()  # return msg ByteBuf back to Netty's pool
+            self.incoming_head = None
+        return buf.tostring()
+````
+
+(`flags` is not looked at, but as usual, this is the sort of thing
+that's likely to be fairly non-portable. TBD.)
+
+The interesting case here is breaking up a received message into
+`bufsize` chunks`. The other interesting detail is that this currently
+involves two copies, one to the `byte[]` array allocated by `jarray`
+(necessary to move the data out of Netty) and then to a `PyString`
+(can be avoided by implementing and using `recv_into` with a
+`bytearray`).
+
+The helper method `socket._get_incoming_msg` handles blocking (with
+possible timeout) and nonblocking cases. In particular, because
+`LinkedBlockingQueue` does not allow for pushing back to the front of
+a queue, it keeps a separate head:
+
+````python
+    def _get_incoming_msg(self):
+        if self.incoming_head is None:
+            if self.blocking:
+                if self.timeout is None:
+                    self.incoming_head = self.incoming.take()
+                else:
+                    self.incoming_head = self.incoming.poll(
+                        self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
+            else:
+                self.incoming_head = self.incoming.poll()  # Could be None
+
+        # Only return _PEER_CLOSED once
+        msg = self.incoming_head
+        if msg is _PEER_CLOSED:
+            self.incoming_head = None
+        return msg
+````
 
 
 Potential issues
