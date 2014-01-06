@@ -211,7 +211,7 @@ Implementing `poll`
 ===================
 
 The select module defines a `poll` object, which supports more
-efficient complementions than the `select` function. This spike didn't
+efficient completions than the `select` function. This spike didn't
 look at specific coding of `poll`, but it appears to be
 straightforward to implement:
 
