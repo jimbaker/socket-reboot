@@ -289,9 +289,9 @@ Reading from the socket
 =======================
 
 Netty does not directly support reading from a socket, as needed by
-`socket.recv`. Instead any code needs to override
-`ChannelInboundHandler.channelRead`, then do something with the
-received message:
+`socket.recv`. Instead any code needs to implement a handler,
+specifically overriding `ChannelInboundHandler.channelRead`, then do
+something with the received message:
 
 ````python
     def channelRead(self, ctx, msg):
@@ -303,8 +303,9 @@ received message:
 
 In particular, each socket in this emulation has an incoming queue (a
 `java.util.concurrent.LinkedBlockingQueue`) which buffers any read
-messages. The one complexity in Netty is that messages are `ByteBuff`,
-which is reference counted by Netty.
+messages. The one complexity in Netty is that messages are `ByteBuf`,
+which is reference counted by Netty, so the ref count needs to be
+increased by one to be used (temporarily) outside of Netty.
 
 This makes `socket.recv` reasonably simple, with three cases to be
 handled:
@@ -332,13 +333,13 @@ The interesting case here is breaking up a received message into
 `bufsize` chunks. The other interesting detail is that this currently
 involves two copies, one to the `byte[]` array allocated by `jarray`
 (necessary to move the data out of Netty) and then to a `PyString`
-(can be avoided by implementing and using `recv_into` with a
-`bytearray`).
+(this second copy can be avoided by implementing and using
+`socket.recv_into` with a `bytearray`).
 
 The helper method `socket._get_incoming_msg` handles blocking (with
 possible timeout) and nonblocking cases. In particular, because
-`LinkedBlockingQueue` does not allow for pushing back to the front of
-a queue, it keeps a separate head:
+`LinkedBlockingQueue` does not allow for pushing back onto the front
+of a queue, the socket wrapper keeps a separate head:
 
 ````python
     def _get_incoming_msg(self):
@@ -358,6 +359,10 @@ a queue, it keeps a separate head:
             self.incoming_head = None
         return msg
 ````
+
+As usual with such code, this method cannot be called concurrently by
+multiple threads, but such thread safety is not guaranteed by
+`socket.recv`.
 
 
 Potential issues
@@ -393,11 +398,11 @@ Namespace import
 ----------------
 
 Let's assume the actual implementation is written in Python. In the
-ant build, Jython uses the Jar Jar Links tool to rerite Java
+ant build, Jython uses the Jar Jar Links tool to rewrite Java
 namespaces to avoid potential conflicts with certain containers,
-however, this rewriting does not take in account any using Python
-code. In particular, this means that use of the io.netty namespace may
-actually be in org.python.io.netty.
+however, this rewriting does not (and reliably cannot) take in account
+any using Python code. In particular, this means that use of the
+io.netty namespace may actually be in org.python.io.netty.
 
 Supporting either is simple: simple do the following in an underlying
 _socket support module to pull in the Netty namespace:
@@ -475,19 +480,17 @@ sockets (`ServerSocketChannel`), unlike how they are exposed in the C
 API. Therefore such bind settings are instead only **intent** until
 either `listen` or `connect` allows this to be realized. It's not
 clear to me the current behavior of returning `port=0` is correct in
-this case however. See the [FIXME existing Jython socket design notes]
-for more info.
+this case however. See the section on [deferred creation][] of sockets
+in the design notes of Jython's current socket implementation.
 
 
 Server socket support
 =====================
 
-Implementing `socket.accept`
-
-Netty's ServerSocketChannel objects use a [child handler][] to setup
-newly created child sockets. This child handler can readily put on a
-blocking queue for such newly created child sockets (per Python socket
-wrapper):
+Implementing `socket.accept` requires using a [child handler][] to
+setup newly created child sockets. This child handler can readily put
+on a blocking queue for such newly created child sockets (per Python
+socket wrapper):
 
 ````python
 class ChildInitializer(ChannelInitializer):
@@ -512,7 +515,7 @@ class ChildInitializer(ChannelInitializer):
 
 ````
 
-`socket.accept` simply looks like the following:
+`socket.accept` then simply looks like the following:
 
 ````python
 class _socketobject(object):
@@ -527,11 +530,11 @@ class _socketobject(object):
 ````
 
 
-
 Notes
 =====
 
-Various observations outside of the main narrative of this README.
+This section captures various observations that were made outside of
+the main narrative of this document.
 
 
 Exceptions
@@ -565,7 +568,8 @@ size of a set during set iteration, throwing a `RuntimeError` if seen.
 `Condition variable`
 --------------------
 
-In general, the pattern of using a condition variable is as follows:
+In general, the pattern of using [condition variables][] is as
+follows:
 
 ````python
 with cv:  # 1
@@ -581,8 +585,6 @@ always is released upon exit of the code block, such as a return; (2)
 ensures both a non-spurious wakeup and potentially no waiting by
 directly testing. Other threads using `cv` can progress given that
 `cv.wait` immediately releases `cv`, then reacquires when woken up.
-
-(See [FIXME Jython concurrency chapter section][] for more details.)
 
 
 Socket timeout
@@ -610,7 +612,6 @@ High priority messages
 Maybe supported in Java 8?
 
 
-
 UDP/datagram support
 --------------------
 
@@ -634,15 +635,16 @@ functionality into Netty.
 Unix domain sockets
 -------------------
 
-Java native runtime project
+The [Java native runtime] project supports Unix domain sockets, but
+this requires writing a Netty plugin.
 
 
 Raw sockets
 -----------
 
-Supporting raw sockets. Presumably this could be done with something
-like RockSaw (http://www.savarese.com/software/rocksaw/, Apache
-licensed), but does not appear to be immediately pluggable into Netty.
+Standard Java libraries do not support raw sockets, but this could be
+done with something like [RockSaw][] (Apache licensed). However, this
+does not appear to be immediately pluggable into Netty.
 
 
 File descriptors for sockets
@@ -674,7 +676,11 @@ to Java.
 
 FIXME add references to Jython wiki
 
-  [experimental branch]: https://bitbucket.org/jimbaker/jython-ssl
-  [Netty]: http://netty.io/wiki/user-guide-for-4.x.html
   [child handler]: http://netty.io/4.0/api/io/netty/bootstrap/ServerBootstrap.html#childHandler(io.netty.channel.ChannelHandler)
+  [condition variables]: http://www.jython.org/jythonbook/en/1.0/Concurrency.html#other-synchronization-objects
+  [deferred creation]: https://wiki.python.org/jython/NewSocketModule#Deferred_socket_creation_on_jython
+  [experimental branch]: https://bitbucket.org/jimbaker/jython-ssl
+  [Java native runtime]: https://github.com/jnr/jnr-unixsocket
+  [Netty]: http://netty.io/wiki/user-guide-for-4.x.html
+  [RockSaw]: http://www.savarese.com/software/rocksaw/
   [selectable stdin]: http://blog.headius.com/2013/06/the-pain-of-broken-subprocess.html
