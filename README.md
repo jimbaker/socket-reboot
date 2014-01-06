@@ -13,27 +13,13 @@ This spike demonstrates with **working code** that for Jython 2.7 we
 can use Netty 4 to readily implement these core semantics, with minor
 exceptions. In particular, this spike mostly looks at the implications
 of implementing the select function, which is both minimally
-documented and tested in Python. The other element addressed is the
-management of Netty's thread pool, especially with respect to cleaning
-up a `PySystemState`.
+documented and tested in Python. The other major element addressed is
+the management of Netty's thread pool, especially with respect to
+cleaning up a `PySystemState`; such management is quite easy to
+implement in practice.
 
 FIXME there are some other things we look at architecturally; also
 significant carryover of other functionality from previous work.
-
-FIXME Unification of blocking/nonblocking socket support
-==================================================
-
-It seems to be a fairly common pattern for Python code to switch from
-blocking to nonblocking support, generally to avoid such issues as
-managing SSL handshaking asynchronously. (I'm not aware of code going
-the opposite direction.)
-
-The current implementation requires multiple implementations, and
-switching from blocking to nonblocking introduces a variety of
-limitations: no true zero blocking, issues with select, not to mention
-lack of SSL.
-
-So unification will be a big win.
 
 
 What was not covered
@@ -54,11 +40,12 @@ server sockets without SSL, blocking or not.
 
 Supporting datagram (UDP) sockets has similar reasoning.
 
-**Still to be done is support for exceptions.** In particular, it is
-not clear that `select(..., ..., xlist)` is a well-defined,
-cross-platform concept for CPython. Appropriate mapping of exceptions
-for socket methods is a potential risk, but likely mitigated by the
-lack of good cross platform definition of exceptions, say Unix vs
+Of the remaining issues to be addressed, **still to be done is support
+for exceptions.** In particular, it is not clear that calling `select`
+with an list of sockets in exception is a well-defined, cross-platform
+concept for even CPython. So while appropriate mapping of exceptions
+for socket methods may be a potential risk, it is likely mitigated by
+the lack of good cross platform definition of exceptions, say Unix vs
 Windows.
 
 
@@ -73,7 +60,12 @@ respect to nonblocking sockets as used with the select module:
 * Java's `Selectable` sockets (`SocketChannel`, `ServerSocketChannel`)
   have a different API than blocking sockets (`Socket`,
   `ServerSocket`). Because they are different implementations, it is
-  not possible in Java to switch from blocking to nonblocking.
+  not possible in Java to switch from blocking to
+  nonblocking. Unfortunately, it seems to be a fairly common pattern
+  for Python code to switch from blocking to nonblocking support,
+  generally to avoid such issues as managing SSL handshaking
+  asynchronously. (I'm not aware of code going the opposite
+  direction.)
 
 * No direct support for working with SSL in a nonblocking way. Java
   supports `SSLSocket` and `SSLServerSocket`, but not a
@@ -86,11 +78,15 @@ respect to nonblocking sockets as used with the select module:
 The current implementation in Jython 2.5 (and current Jython trunk)
 does have a socket and select implementation that works around the
 first problem, but at the cost of significant complexity in additional
-corner cases and known warts. [FIXME refer to wiki docs, blog post]
+corner cases and known warts. In particular, this means no true zero
+blocking when switching, issues with select, not to mention lack of
+SSL. [FIXME refer to wiki docs, blog post]
+
+So unification will be a big win.
 
 Netty 4 allows us to sidestep both these issues seen previously in
-Jython 2.5 and add SSL. We make the following observations in this
-spike:
+Jython 2.5, add SSL, and achieve this desired unification. We make the
+following observations in this spike:
 
 * As should be expected, we can layer blocking functionality on a
   common nonblocking implementation. But this is especially easy to do
@@ -145,7 +141,7 @@ purposes, it really doesn't matter that this division exists.
 
 
 Specific mapping
-================
+----------------
 
 Rather than directly map to be ready-to-read/ready-to-write/error
 state, notify condition variable for selector, then test levels in the
@@ -204,11 +200,46 @@ post_connect step.
 Note that we could potentially observe the handshake process by seeing
 `SSL_ERROR_WANT_READ` and `SSL_ERROR_WANT_WRITE` exceptions in the
 `SSLSocket.do_handshake()` method, then requiring the user to call
-select, but this is pointless.
+select, but this is pointless. The documentation of `do_handshake()`
+makes this clear:
+
+> Perform a TLS/SSL handshake. If this is used with a non-blocking
+  socket, it may raise SSLError with an arg[0] of SSL_ERROR_WANT_READ
+  or SSL_ERROR_WANT_WRITE, in which case it must be called again until
+  it completes successfully.
+
+(http://docs.python.org/2/library/ssl.html#ssl.SSLSocket.do_handshake)
+
+The operative term is *may*, so we do not have to support this
+behavior and just let the threadpool do it.
+
+This is seen in the example in the docs, which simulates blocking
+behavior on nonblocking SSL sockets:
+
+````python
+while True:
+    try:
+        s.do_handshake()
+        break
+    except ssl.SSLError as err:
+        if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+            select.select([s], [], [])
+        elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+            select.select([], [s], [])
+        else:
+            raise
+````
+
+Such code will never see `ssl.SSL_ERROR_WANT_READ` and
+`ssl.SSL_ERROR_WANT_WRITE` exceptions, but will continue to be
+correct.
+
+Lastly, I did not take a look at `ssl.unwrap_socket`, however, a
+SslHandler can be added/removed from the ChannelPipeline at any time.
 
 
 Implementing `poll`
-===================
+-------------------
 
 The select module defines a `poll` object, which supports more
 efficient completions than the `select` function. This spike didn't
@@ -332,8 +363,8 @@ a queue, it keeps a separate head:
 Potential issues
 ================
 
-Overhead
---------
+Jar overhead
+------------
 
 To use Netty 4 with Jython, the following jars (as of the 4.0.13
 version) are needed, for a total of approx 958K:
@@ -349,15 +380,24 @@ netty-transport-4.0.13.Final.jar | 278K
 So this is a minimal addition to Jython's dependencies.
 
 
+Writing in Python
+-----------------
+
+This spike is implemented in Python, specifically "pure Jython"
+(Python code using Java). Except for some isolated hot spots,
+performance is not likely to be improved by rewriting in Java because
+everything is in terms of bulk ops.
+
+
 Namespace import
 ----------------
 
-Let's assume the actual implementation is written in Python, using
-Java (aka, pure Jython). In the ant build, Jython uses the Jar Jar
-Links tool to rerite Java namespaces to avoid potential conflicts with
-certain containers, however, this rewriting does not take in account
-any using Python code. In particular, this means that use of the
-io.netty namespace may actually be in org.python.io.netty.
+Let's assume the actual implementation is written in Python. In the
+ant build, Jython uses the Jar Jar Links tool to rerite Java
+namespaces to avoid potential conflicts with certain containers,
+however, this rewriting does not take in account any using Python
+code. In particular, this means that use of the io.netty namespace may
+actually be in org.python.io.netty.
 
 Supporting either is simple: simple do the following in an underlying
 _socket support module to pull in the Netty namespace:
@@ -420,11 +460,23 @@ to actually open sockets.
 Late binding of `socket.bind`
 -----------------------------
 
-Per these docs FIXME, the same restriction will apply for ephemeral
-sockets as in current Jython - bind is intent, not final. This is a
-fundamental limitation stemming from the Java API design separating
-server sockets from client sockets, unlike how they are exposed in a C
-API.
+In Python it is possible to get the actual ephemeral socket address
+before `listen` (or less likely, `connect`):
+
+````python
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("localhost", 0))  # request ephemeral port by using 0
+host, port = s.getsockname()
+````
+
+In Java, sockets can only be either client (`SocketChannel`) or server
+sockets (`ServerSocketChannel`), unlike how they are exposed in the C
+API. Therefore such bind settings are instead only **intent** until
+either `listen` or `connect` allows this to be realized. It's not
+clear to me the current behavior of returning `port=0` is correct in
+this case however. See the [FIXME existing Jython socket design notes]
+for more info.
 
 
 Server socket support
@@ -474,52 +526,6 @@ class _socketobject(object):
         return child_sock, child_sock.address
 ````
 
-
-`ssl.unwrap`
-============
-
-* SslHandler can be added/removed from the ChannelPipeline at any
-  time, so this allows support for ssl.wrap/ssl.unwrap
-
-* The wrapping SSLSocket can simply note this state change, including
-  ensuring child sockets have the appropriate SSL behavior.
-
-
-Differences in socket framing
-=============================
-
-SSLSocket.do_handshake()
-
-Per the docs (http://docs.python.org/2/library/ssl.html#ssl.SSLSocket.do_handshake)
-
-> Perform a TLS/SSL handshake. If this is used with a non-blocking
-  socket, it may raise SSLError with an arg[0] of SSL_ERROR_WANT_READ
-  or SSL_ERROR_WANT_WRITE, in which case it must be called again until
-  it completes successfully.
-
-The operative term is *may*, so we do not have to support this
-behavior and just let the threadpool do it.
-
-This is seen in the example in the docs, which simulates blocking
-behavior on nonblocking SSL sockets:
-
-````python
-while True:
-    try:
-        s.do_handshake()
-        break
-    except ssl.SSLError as err:
-        if err.args[0] == ssl.SSL_ERROR_WANT_READ:
-            select.select([s], [], [])
-        elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
-            select.select([], [s], [])
-        else:
-            raise
-````
-
-Such code will never see `ssl.SSL_ERROR_WANT_READ` and
-`ssl.SSL_ERROR_WANT_WRITE` exceptions, but will continue to be
-correct.
 
 
 Notes
@@ -573,35 +579,24 @@ with cv:  # 1
 This snippet (1) acquires the condition variable `cv` such that it
 always is released upon exit of the code block, such as a return; (2)
 ensures both a non-spurious wakeup and potentially no waiting by
-directly testing. Note that `cv.wait` immediately releases `cv`, then
-reacquires when woken up.
+directly testing. Other threads using `cv` can progress given that
+`cv.wait` immediately releases `cv`, then reacquires when woken up.
 
 (See [FIXME Jython concurrency chapter section][] for more details.)
 
 
-Effiency considerations
------------------------
-
-FIXME also refcounting makes this discussion irrelevant
-
-Given how Netty pipelines and that all operations are done with
-respect to ByteBuf, it's likely that there would be little benefit in
-translating to Java, except for perhaps a couple of hot spots.
-
-Copying between ByteBuf and PyString introduces unfortunate overhead
-and extra allocation costs. `socket.recv_into` probably doesn't help,
-given the differences between the buffer API and ByteBuf.
-
+Socket timeout
+--------------
 
 `SO_TIMEOUT`
-------------
+
 
 * I do not think this applies: 
 
 My reading of
 http://docs.python.org/2/library/socket.html#socket.socket.settimeout
 
-is that this is not a shortcut for setting a socket option SO_TIMEOUT,
+is that this is not a shortcut for setting a socket option `SO_TIMEOUT`,
 but instead corresponds to "await timeout".
 
      * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
@@ -609,10 +604,10 @@ but instead corresponds to "await timeout".
        "Do not confuse I/O timeout and await timeout"
 
 
-High priority
--------------
+High priority messages
+----------------------
 
-Maybe in Java 8?
+Maybe supported in Java 8?
 
 
 
@@ -658,7 +653,7 @@ File descriptors for sockets
 meaningful concept in Java, so it seems most straightforward to simply
 return the socket object itself. (Note that file descriptors in the
 previous Jython implementation are objects, of type
-`org.python.core.io.SocketIO`.) The alternative is to maintain a weap
+`org.python.core.io.SocketIO`.) The alternative is to maintain a weak
 bidrectional map of integers to sockets, which seems both pointless
 and a lot of work.
 
