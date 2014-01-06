@@ -241,11 +241,17 @@ descriptors][], not sockets.
 Writing to the socket
 =====================
 
-FIXME
+Implementing `socket.send` is straightforward, although this is a good
+example of where there's been no work on figuring out precise
+exceptions yet:
 
-`socket.send` needs to take into account isWritable; `socket.sendall`
-simply blocks accordingly (I don't believe this makes any sense for
-nonblocking sockets TBD).
+````python
+    def send(self, data):
+        if not self.can_write:
+            raise Exception("Cannot write to closed socket")  # FIXME use actual exception
+        future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
+        self._handle_channel_future(future, "send")
+````
 
 
 Reading from the socket
@@ -292,7 +298,7 @@ handled:
 that's likely to be fairly non-portable. TBD.)
 
 The interesting case here is breaking up a received message into
-`bufsize` chunks`. The other interesting detail is that this currently
+`bufsize` chunks. The other interesting detail is that this currently
 involves two copies, one to the `byte[]` array allocated by `jarray`
 (necessary to move the data out of Netty) and then to a `PyString`
 (can be avoided by implementing and using `recv_into` with a
@@ -326,15 +332,21 @@ a queue, it keeps a separate head:
 Potential issues
 ================
 
-
 Overhead
 --------
 
-[bring in buffer discussion]
+To use Netty 4 with Jython, the following jars (as of the 4.0.13
+version) are needed, for a total of approx 958K:
 
-In addition, the necessary jars we would need to add to Jython are
-minimal in size, on the order of 1 MB, because there's no need for
-codecs or most of the transports.
+Jar                              | Size
+-------------------------------- | ---:
+netty-buffer-4.0.13.Final.jar    | 138K
+netty-codec-4.0.13.Final.jar     | 134K
+netty-common-4.0.13.Final.jar    | 336K
+netty-handler-4.0.13.Final.jar   |  72K
+netty-transport-4.0.13.Final.jar | 278K 
+
+So this is a minimal addition to Jython's dependencies.
 
 
 Namespace import
