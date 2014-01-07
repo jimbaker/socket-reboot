@@ -32,7 +32,7 @@ turn is blocking on nonblocking SSL support for peer (client) sockets.
 So this means there's no support for server sockets in this spike;
 however I did some quick analysis of the Netty docs that suggests that
 such [support](#server-socket-support) should be straightforward. As a
-fallback -- although this should not be necessary -- there's an
+fallback - although this should not be necessary - there's an
 existing solution in Jython trunk for server sockets without SSL,
 blocking or not.
 
@@ -650,21 +650,20 @@ support above; and to go the reverse direction to support
 can happen of sockets.)
 
 Likewise `fromfd` is not really a meaningful concept for Java, so it
-should not be made available. See for example one interesting use
-case:
-https://forrst.com/posts/Sharing_Sockets_Across_Processes_in_Python-46s
-- this is much like working with `fork`, another concept not portable
-to Java.
+should not be made available. In particular, as seen in [this
+example][fromfd example], using `fromfd` is much like working with `fork`,
+another concept not portable to Java.
 
 
 <!-- references -->
 
-  [2.5 socket]: https://wiki.python.org/jython/NewSocketModule
   [2.5 select]: https://wiki.python.org/jython/SelectModule
+  [2.5 socket]: https://wiki.python.org/jython/NewSocketModule
   [child handler]: http://netty.io/4.0/api/io/netty/bootstrap/ServerBootstrap.html#childHandler(io.netty.channel.ChannelHandler)
   [condition variables]: http://www.jython.org/jythonbook/en/1.0/Concurrency.html#other-synchronization-objects
   [deferred creation]: https://wiki.python.org/jython/NewSocketModule#Deferred_socket_creation_on_jython
   [experimental branch]: https://bitbucket.org/jimbaker/jython-ssl
+  [fromfd example]: https://forrst.com/posts/Sharing_Sockets_Across_Processes_in_Python-46s
   [Java native runtime]: https://github.com/jnr/jnr-unixsocket
   [Netty]: http://netty.io/wiki/user-guide-for-4.x.html
   [RockSaw]: http://www.savarese.com/software/rocksaw/
