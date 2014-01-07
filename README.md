@@ -18,14 +18,11 @@ the management of Netty's thread pool, especially with respect to
 cleaning up a `PySystemState`; such management is quite easy to
 implement in practice.
 
-FIXME there are some other things we look at architecturally; also
-significant carryover of other functionality from previous work.
-
 
 What was not covered
 ====================
 
-This has intentionally been a limited [FIXME spike][], which is a
+This has intentionally been a limited [spike][], which is a
 generally good thing to do with spikes.
 
 In particular, the milestone for releasing Jython 2.7 beta 2 is to
@@ -33,12 +30,13 @@ support pip, which in turn requires support for requests, which in
 turn is blocking on nonblocking SSL support for peer (client) sockets.
 
 So this means there's no support for server sockets in this spike;
-however I did some [FIXME quick analysis][] of the Netty docs that
-suggests this support should be straightforward. Although this should
-not be necessary, there's an existing solution in Jython trunk for
-server sockets without SSL, blocking or not.
+however I did some quick analysis of the Netty docs that suggests that
+such [support](#server-socket-support) should be straightforward. As a
+fallback -- although this should not be necessary -- there's an
+existing solution in Jython trunk for server sockets without SSL,
+blocking or not.
 
-Supporting datagram (UDP) sockets has similar reasoning.
+Supporting datagram (UDP) sockets has a similar fallback.
 
 Of the remaining issues to be addressed, **still to be done is support
 for exceptions.** In particular, it is not clear that calling `select`
@@ -76,11 +74,9 @@ respect to nonblocking sockets as used with the select module:
   function`).
 
 The current implementation in Jython 2.5 (and current Jython trunk)
-does have a socket and select implementation that works around the
-first problem, but at the cost of significant complexity in additional
-corner cases and known warts. In particular, this means no true zero
-blocking when switching, issues with select, not to mention lack of
-SSL. [FIXME refer to wiki docs, blog post]
+does have a [socket][2.5 socket] and [select][2.5 select]
+implementation that works around the first problem, but at the cost of
+significant complexity in additional corner cases and known warts.
 
 So unification will be a big win.
 
@@ -161,18 +157,18 @@ SSLHandler.handshakeFuture   | Also initiates post-connect phase that sets up Py
 (CIH = ChannelInboundHandler)
 
 Notification from socket to selector is straightforward. Each socket
-manages a [FIXME list of listeners] (selector, registered poll
-objects) using a `CopyOnWriteArrayList`; normally we would expect a
-size of no more than 1, but Python select/poll semantics do allow
-multiple listeners.
+manages a [list of listeners](#managing-listeners) (selector,
+registered poll objects) using a `CopyOnWriteArrayList`; normally we
+would expect a size of no more than 1, but Python select/poll
+semantics do allow multiple listeners.
 
-The [FIXME usual pattern][] of working with a condition variable is
-further extended in the case of the select mechanism, because we need
-to explicitly register and unregister the selector for each socket. To
-avoid races of unregistration and notification, this should be always
-nested in the acquisition of condition variable and the unregistration
-always performed upon exit. Having `register_selectors` be a context
-manager ensures this is the case:
+The [usual pattern](#condition-variable) of working with a condition
+variable is further extended in the case of the select mechanism,
+because we need to explicitly register and unregister the selector for
+each socket. To avoid races of unregistration and notification, this
+should be always nested in the acquisition of condition variable and
+the unregistration always performed upon exit. Having
+`register_selectors` be a context manager ensures this is the case:
 
 ````python
 with self.cv, self._register_sockets(chain(self.rlist, self.wlist, self.xlist)):
@@ -234,8 +230,9 @@ Such code will never see `ssl.SSL_ERROR_WANT_READ` and
 `ssl.SSL_ERROR_WANT_WRITE` exceptions, but will continue to be
 correct.
 
-Lastly, I did not take a look at `ssl.unwrap_socket`, however, a
-SslHandler can be added/removed from the ChannelPipeline at any time.
+Although not investigated in this spike, implementing
+`ssl.unwrap_socket` should be easy given that a `SslHandler` can be
+added/removed from the channel's pipeline at any time.
 
 
 Implementing `poll`
@@ -265,8 +262,8 @@ straightforward to implement:
 To be determined is the possibility of supporting `POLLPRI`; other
 events are straightforward.
 
-The remaining complication is that `poll` works with [FIXME file
-descriptors][], not sockets.
+A minor issue is that `poll` works with [file
+descriptors](#file-descriptors-for-sockets), not sockets.
 
 
 Writing to the socket
@@ -556,13 +553,15 @@ the existing implementation or my [experimental branch][] (eg peer
 certificate introspection).
 
 
-`ConcurrentHashMap`
--------------------
+Managing listeners
+------------------
 
-Jython backs `set` with a `ConcurrentHashMap`. Although the semantics
-of weakly consistent iteration of CHM is sufficient for notification,
-Jython actually follows what CPython does and will detect a change in
-size of a set during set iteration, throwing a `RuntimeError` if seen.
+Although Jython backs `set` with a `ConcurrentHashMap`, this is not
+sufficient for a list of listeners, which can be concurrently
+modified. Although the semantics of weakly consistent iteration of CHM
+is sufficient for notification, Jython actually follows what CPython
+does and will detect a change in size of a set during set iteration,
+throwing a `RuntimeError` if seen.
 
 
 `Condition variable`
@@ -604,20 +603,6 @@ but instead corresponds to "await timeout".
      * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
      * http://netty.io/4.0/api/io/netty/channel/ChannelFuture.html 
        "Do not confuse I/O timeout and await timeout"
-
-
-High priority messages
-----------------------
-
-Maybe supported in Java 8?
-
-
-UDP/datagram support
---------------------
-
-FIXME - available in Netty 4 - apparently this is one advantage over
-Async*Channel. Apparently async datagram channel support slipped to
-Java 8.
 
 
 Selectable files
@@ -674,8 +659,8 @@ to Java.
 
 <!-- references -->
 
-FIXME add references to Jython wiki
-
+  [2.5 socket]: https://wiki.python.org/jython/NewSocketModule
+  [2.5 select]: https://wiki.python.org/jython/SelectModule
   [child handler]: http://netty.io/4.0/api/io/netty/bootstrap/ServerBootstrap.html#childHandler(io.netty.channel.ChannelHandler)
   [condition variables]: http://www.jython.org/jythonbook/en/1.0/Concurrency.html#other-synchronization-objects
   [deferred creation]: https://wiki.python.org/jython/NewSocketModule#Deferred_socket_creation_on_jython
@@ -684,3 +669,4 @@ FIXME add references to Jython wiki
   [Netty]: http://netty.io/wiki/user-guide-for-4.x.html
   [RockSaw]: http://www.savarese.com/software/rocksaw/
   [selectable stdin]: http://blog.headius.com/2013/06/the-pain-of-broken-subprocess.html
+  [spike]: http://agiledictionary.com/209/spike/
