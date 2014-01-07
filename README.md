@@ -449,14 +449,21 @@ Security manager considerations
 -------------------------------
 
 In certain cases, imports of _socket and usage of Python sockets may
-fail due to security manager restrictions:
+fail due to [security manager][] restrictions:
 
-* Thread FIXME specifically around thread groups
-* Socket FIXME
+* `SecurityManager.checkAccess` can restrict the construction of new
+  threads for a given thread group, which could cause the failure of the thread pool.
+
+* `SecurityManager.checkConnect` and `SecurityManager.checkListen` can
+  be used to block the construction of peer and server sockets
+  respectively.
 
 My understanding is that restricting creation of threads is fairly
 rare in containers, and would presumably be subsumed under being able
-to actually open sockets.
+to actually open sockets. But it's up to the specific security
+manager. In general, this is not an issue, especially for the use case
+of supporting pip, which will be run from the command line or as part
+of some tooling.
 
 
 Late binding of `socket.bind`
@@ -586,27 +593,8 @@ directly testing. Other threads using `cv` can progress given that
 `cv.wait` immediately releases `cv`, then reacquires when woken up.
 
 
-Socket timeout
---------------
-
-`SO_TIMEOUT`
-
-
-* I do not think this applies: 
-
-My reading of
-http://docs.python.org/2/library/socket.html#socket.socket.settimeout
-
-is that this is not a shortcut for setting a socket option `SO_TIMEOUT`,
-but instead corresponds to "await timeout".
-
-     * http://docs.python.org/2/library/socket.html#socket.socket.settimeout vs
-     * http://netty.io/4.0/api/io/netty/channel/ChannelFuture.html 
-       "Do not confuse I/O timeout and await timeout"
-
-
 Selectable files
------------------
+----------------
 
 Jython currently does not support selectable files. However, Netty
 (and the underlying Java platform, I believe this may require NIO2,
@@ -617,19 +605,21 @@ presumably this requires bolting in a suitable stdin plugin for this
 functionality into Netty.
 
 
-Unix domain sockets
--------------------
+Possible Netty plugins
+----------------------
 
-The [Java native runtime] project supports Unix domain sockets, but
-this requires writing a Netty plugin.
+In addition to the stdin plugin for Netty, there a couple more to
+potentially consider that would require writing a Netty plugin:
 
+* Unix domain sockets. The [Java native runtime] project supports Unix
+  domain sockets.
 
-Raw sockets
------------
+* Raw sockets. Standard Java libraries do not support raw sockets, but
+  this could be done with something like [RockSaw][] (Apache
+  licensed).
 
-Standard Java libraries do not support raw sockets, but this could be
-done with something like [RockSaw][] (Apache licensed). However, this
-does not appear to be immediately pluggable into Netty.
+With such a plugin, and with some minimal extra glue, this should then
+just work with the approach specified here.
 
 
 File descriptors for sockets
@@ -667,5 +657,6 @@ another concept not portable to Java.
   [Java native runtime]: https://github.com/jnr/jnr-unixsocket
   [Netty]: http://netty.io/wiki/user-guide-for-4.x.html
   [RockSaw]: http://www.savarese.com/software/rocksaw/
+  [security manager]: http://docs.oracle.com/javase/7/docs/api/java/lang/SecurityManager.html
   [selectable stdin]: http://blog.headius.com/2013/06/the-pain-of-broken-subprocess.html
   [spike]: http://agiledictionary.com/209/spike/
