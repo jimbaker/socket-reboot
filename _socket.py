@@ -23,7 +23,7 @@ NIO_GROUP = NioEventLoopGroup()
 
 def _shutdown_threadpool():
     print >> sys.stderr, "Shutting down thread pool..."
-    time.sleep(0.1)
+    time.sleep(0.1)  # currently necessary probably due to incomplete close FIXME
     NIO_GROUP.shutdown()
     print >> sys.stderr, "Shut down thread pool."
 
@@ -37,6 +37,8 @@ sys.registerCloser(_shutdown_threadpool)
 TO_NANOSECONDS = 1000000000
 
 
+# FIXME add __all__
+
 SHUT_RD, SHUT_WR = 1, 2
 SHUT_RDWR = SHUT_RD | SHUT_WR
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
@@ -44,7 +46,8 @@ _GLOBAL_DEFAULT_TIMEOUT = object()
 AF_INET = object()  # change to numeric values presumably FIXME
 SOCK_STREAM = object()
 SOL_SOCKET = 0xFFFF
-SO_ERROR       = 4
+SO_ERROR = 4
+_PEER_CLOSED = object()
 
 
 class error(IOError): pass
@@ -54,11 +57,6 @@ class timeout(error): pass
 class sslerror(error): pass
 
 SSLError = sslerror
-
-
-_PEER_CLOSED = object()
-
-
 
 
 class _Select(object):
@@ -324,12 +322,13 @@ class SSLInitializer(ChannelInitializer):
 
 class SSLSocket(object):
     
-    def __init__(self, sock):
+    def __init__(self, sock, do_handshake_on_connect=True):
         self.sock = sock
         self.engine = SSLContext.getDefault().createSSLEngine()
         self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
         self.ssl_handler = SslHandler(self.engine)
         self.ssl_writable = False
+        self.already_handshaked = False
 
         def handshake_step(x):
             print "Handshaking result", x
@@ -338,22 +337,21 @@ class SSLSocket(object):
             self.sock._notify_selectors()
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
-
-        # FIXME presumably if already connected, do this:
-        # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine)), or maybe addBefore the python_inbound_handler
-        if self.sock.connected:
-            print "Adding SSL handler to pipeline..."
-            self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
-        else:
-            self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
+        if do_handshake_on_connect:
+            self.already_handshaked = True
+            if self.sock.connected:
+                print "Adding SSL handler to pipeline..."
+                self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
+            else:
+                self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def connect(self, addr):
         print "Connecting SSL socket"
         self.sock._connect(addr)
 
     def send(self, data):
-        data = str(data)  # in case it's a buffer
         print "Sending data over SSL socket... %s, %r" % (type(data), data)
+        data = str(data)  # in case it's a buffer
         self.ssl_writable = False  # special writability step after negotiation
         self.sock.send(str(data))
         print "Sent data"
@@ -384,7 +382,11 @@ class SSLSocket(object):
         self.sock._notify_selectors()
 
     def do_handshake(self):
-        pass  # FIXME
+        if not self.already_handshaked:
+            print "do_handshake"
+            self.already_handshaked = True
+            self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
+
 
     def getpeername(self):
         x = self.sock.getpeername()
@@ -428,7 +430,7 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
-    return SSLSocket(sock)
+    return SSLSocket(sock, do_handshake_on_connect=do_handshake_on_connect)
 
 
 def unwrap_socket(sock):
