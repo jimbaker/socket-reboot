@@ -1,6 +1,6 @@
 # implements a spike of socket, select, and ssl support
  
-
+import errno
 import jarray
 import sys
 import time
@@ -23,6 +23,7 @@ NIO_GROUP = NioEventLoopGroup()
 
 def _shutdown_threadpool():
     print >> sys.stderr, "Shutting down thread pool..."
+    time.sleep(0.1)
     NIO_GROUP.shutdown()
     print >> sys.stderr, "Shut down thread pool."
 
@@ -39,6 +40,20 @@ TO_NANOSECONDS = 1000000000
 SHUT_RD, SHUT_WR = 1, 2
 SHUT_RDWR = SHUT_RD | SHUT_WR
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
+_GLOBAL_DEFAULT_TIMEOUT = object()
+AF_INET = object()  # change to numeric values presumably FIXME
+SOCK_STREAM = object()
+SOL_SOCKET = 0xFFFF
+SO_ERROR       = 4
+
+
+class error(IOError): pass
+class herror(error): pass
+class gaierror(error): pass
+class timeout(error): pass
+class sslerror(error): pass
+
+SSLError = sslerror
 
 
 _PEER_CLOSED = object()
@@ -132,8 +147,7 @@ class _socketobject(object):
         self.can_write = True
         self.connect_handlers = []
         self.peer_closed = False
-
-
+        self.connected = False
 
     def _register_selector(self, selector):
         self.selectors.addIfAbsent(selector)
@@ -153,11 +167,11 @@ class _socketobject(object):
                 future.await(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
                 return future
         else:
-            def workaround_jython_bug(x):
+            def workaround_jython_bug_for_bound_methods(x):
                 # print "Notifying selectors", self
                 self._notify_selectors()
 
-            future.addListener(workaround_jython_bug)
+            future.addListener(workaround_jython_bug_for_bound_methods)
             return future
 
     def setblocking(self, mode):
@@ -170,6 +184,7 @@ class _socketobject(object):
             self.timeout = timeout
 
     def _connect(self, addr):
+        self.connected = True
         host, port = addr
         self.python_inbound_handler = PythonInboundHandler(self)
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
@@ -206,6 +221,13 @@ class _socketobject(object):
         # Unwrapped sockets can immediately perform the post-connect step
         self._connect(addr)
         self._post_connect()
+
+    def connect_ex(self, addr):
+        self.connect(addr)
+        if self.blocking:
+            return 0 #errno.EISCONN
+        else:
+            return errno.EINPROGRESS
 
     def close(self):
         future = self.channel.close()
@@ -265,6 +287,17 @@ class _socketobject(object):
             self.incoming_head = None
         return buf.tostring()
 
+    def fileno(self):
+        return self
+
+    def getsockopt(self, level, option):
+        return 0
+
+    def getpeername(self):
+        remote_addr = self.channel.remoteAddress()
+        return remote_addr.hostAddress, remote_addr.port
+
+
 
 # ssl.wrap_socket essentially creates a SSLEngine instance, then adds the
 # handler; the engine needs to be kept around for the duration of the wrap for
@@ -308,17 +341,23 @@ class SSLSocket(object):
 
         # FIXME presumably if already connected, do this:
         # self.sock.channel.pipeline().addFirst("ssl", SslHandler(self.engine)), or maybe addBefore the python_inbound_handler
-        self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
+        if self.sock.connected:
+            print "Adding SSL handler to pipeline..."
+            self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
+        else:
+            self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def connect(self, addr):
         print "Connecting SSL socket"
         self.sock._connect(addr)
 
     def send(self, data):
-        print "Sending data over SSL socket..."
+        data = str(data)  # in case it's a buffer
+        print "Sending data over SSL socket... %s, %r" % (type(data), data)
         self.ssl_writable = False  # special writability step after negotiation
-        self.sock.send(data)
+        self.sock.send(str(data))
         print "Sent data"
+        return len(data)
 
     def recv(self, bufsize, flags=0):
         return self.sock.recv(bufsize, flags)
@@ -343,6 +382,14 @@ class SSLSocket(object):
 
     def _notify_selectors(self):
         self.sock._notify_selectors()
+
+    def do_handshake(self):
+        pass  # FIXME
+
+    def getpeername(self):
+        x = self.sock.getpeername()
+        print "peer name", x
+        return x
 
 
 
@@ -386,3 +433,48 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
 
 def unwrap_socket(sock):
     pass
+
+
+
+
+
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None):
+    """Connect to *address* and return the socket object.
+
+    Convenience function.  Connect to *address* (a 2-tuple ``(host,
+    port)``) and return the socket object.  Passing the optional
+    *timeout* parameter will set the timeout on the socket instance
+    before attempting to connect.  If no *timeout* is supplied, the
+    global default timeout setting returned by :func:`getdefaulttimeout`
+    is used.  If *source_address* is set it must be a tuple of (host, port)
+    for the socket to bind as a source address before making the connection.
+    An host of '' or port 0 tells the OS to use the default.
+    """
+
+    host, port = address
+    err = None
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            return sock
+
+        except error as _:
+            err = _
+            if sock is not None:
+                sock.close()
+
+    if err is not None:
+        raise err
+    else:
+        raise error("getaddrinfo returns an empty list")
+
+
+
