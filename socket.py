@@ -1,3 +1,6 @@
 # dispatches to _socket for actual implementation
 
-from _socket import socket, SHUT_RD, SHUT_WR, SHUT_RDWR
+# use from _socket import * - this is tedious
+from _socket import socket, AF_INET, _GLOBAL_DEFAULT_TIMEOUT, SOCK_STREAM, SHUT_RD, SHUT_WR, SHUT_RDWR, SOL_SOCKET, create_connection, error, SO_ERROR
+
+# 
