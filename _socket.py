@@ -425,8 +425,7 @@ def select(rlist, wlist, xlist, timeout=None):
 def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=None, ca_certs=None, do_handshake_on_connect=True,
                 suppress_ragged_eofs=True, ciphers=None):
-    # instantiates a SSLEngine, with the following set:
-    # do_handshake_on_connect is always True, since it's always nonblocking... verify this works with Python code
+    # instantiates a SSLEngine, with the following things to keep in mind:
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
