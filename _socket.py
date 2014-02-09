@@ -23,30 +23,39 @@ NIO_GROUP = NioEventLoopGroup()
 
 def _shutdown_threadpool():
     print >> sys.stderr, "Shutting down thread pool..."
-    time.sleep(0.1)  # currently necessary probably due to incomplete close FIXME
-    NIO_GROUP.shutdown()
+    # FIXME this timeout probably should be configurable; for client
+    # usage that have completed this probably only produces scary
+    # messages at worst, but TBD; in particular this may because we
+    # are seeing closes both in SSL and at the socket level
+    NIO_GROUP.shutdownGracefully(0, 100, TimeUnit.MILLISECONDS)
     print >> sys.stderr, "Shut down thread pool."
 
 # Ensure deallocation of thread pool if PySystemState.cleanup is
 # called; this includes in the event of sigterm
 sys.registerCloser(_shutdown_threadpool)
 
+
+# FIXME fill in more constants
+AF_UNSPEC, AF_INET, AF_INET6 = 0, 2, 23
+SOCK_STREAM, SOCK_DGRAM = 1, 2
+SHUT_RD, SHUT_WR = 1, 2
+SHUT_RDWR = SHUT_RD | SHUT_WR
+_GLOBAL_DEFAULT_TIMEOUT = object()
+
+SOL_SOCKET = 0xFFFF
+SO_ERROR = 4
+
+# FIXME move to a _ssl implementation?
+CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
+
+
+# socket-reboot/Netty 4 specific constants
+
 # Keep the highest possible precision for converting from Python's use
 # of floating point for durations to Java's use of both a long
 # duration and a specific unit, in this case TimeUnit.NANOSECONDS
-TO_NANOSECONDS = 1000000000
+_TO_NANOSECONDS = 1000000000
 
-
-# FIXME add __all__
-
-SHUT_RD, SHUT_WR = 1, 2
-SHUT_RDWR = SHUT_RD | SHUT_WR
-CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
-_GLOBAL_DEFAULT_TIMEOUT = object()
-AF_INET = object()  # change to numeric values presumably FIXME
-SOCK_STREAM = object()
-SOL_SOCKET = 0xFFFF
-SO_ERROR = 4
 _PEER_CLOSED = object()
 
 
@@ -56,7 +65,7 @@ class gaierror(error): pass
 class timeout(error): pass
 class sslerror(error): pass
 
-SSLError = sslerror
+SSLError = sslerror  # is sslerror actually used?
 
 
 class _Select(object):
@@ -162,7 +171,7 @@ class _socketobject(object):
             if self.timeout is None:
                 return future.sync()
             else:
-                future.await(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
+                future.await(self.timeout * _TO_NANOSECONDS, TimeUnit.NANOSECONDS)
                 return future
         else:
             def workaround_jython_bug_for_bound_methods(x):
@@ -257,7 +266,7 @@ class _socketobject(object):
                 if self.timeout is None:
                     self.incoming_head = self.incoming.take()
                 else:
-                    self.incoming_head = self.incoming.poll(self.timeout * TO_NANOSECONDS, TimeUnit.NANOSECONDS)
+                    self.incoming_head = self.incoming.poll(self.timeout * _TO_NANOSECONDS, TimeUnit.NANOSECONDS)
             else:
                 self.incoming_head = self.incoming.poll()  # Could be None
 
@@ -361,6 +370,7 @@ class SSLSocket(object):
         return self.sock.recv(bufsize, flags)
         
     def close(self):
+        # should this also unwrap the channel?
         self.sock.close()
 
     def shutdown(self, how):
@@ -387,11 +397,8 @@ class SSLSocket(object):
             self.already_handshaked = True
             self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
 
-
     def getpeername(self):
-        x = self.sock.getpeername()
-        print "peer name", x
-        return x
+        return self.sock.getpeername()
 
 
 
@@ -433,10 +440,8 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
 
 
 def unwrap_socket(sock):
+    # FIXME removing SSL handler from pipeline should suffice, but low pri for now
     pass
-
-
-
 
 
 def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
