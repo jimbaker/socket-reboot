@@ -10,11 +10,11 @@ from contextlib import contextmanager
 from itertools import chain
 from threading import Condition
 
-from io.netty.bootstrap import Bootstrap, ChannelFactory
+from io.netty.bootstrap import Bootstrap, ChannelFactory, ServerBootstrap
 from io.netty.buffer import PooledByteBufAllocator, Unpooled
 from io.netty.channel import ChannelInboundHandlerAdapter, ChannelInitializer, ChannelOption
 from io.netty.channel.nio import NioEventLoopGroup
-from io.netty.channel.socket.nio import NioSocketChannel
+from io.netty.channel.socket.nio import NioSocketChannel, NioServerSocketChannel
 from io.netty.handler.ssl import SslHandler
 from javax.net.ssl import SSLContext
 from java.util import NoSuchElementException
@@ -217,7 +217,7 @@ class _socketobject(object):
     # Calling connect/connect_ex means this is a client socket; these
     # in turn use _connect, which uses Bootstrap, not ServerBootstrap
 
-    def _init_client_mode(self):
+    def _init_client_mode(self, channel=None):
         # this is client socket specific 
         self.socket_type = CLIENT_SOCKET
         self.incoming = LinkedBlockingQueue()  # list of read buffers
@@ -227,6 +227,12 @@ class _socketobject(object):
         self.connect_handlers = []
         self.peer_closed = False
         self.connected = False
+        if channel:
+            # add support for SSL somehow FIXME
+            self.channel = channel
+            self.python_inbound_handler = PythonInboundHandler(self)
+            self.connect_handlers = [self.python_inbound_handler]
+            self._post_connect()
 
     def _connect(self, addr):
         self._init_client_mode()
@@ -301,10 +307,12 @@ class _socketobject(object):
 
         # returns a ChannelFuture, but regardless for blocking/nonblocking, return immediately
         # FIXME what if bind_addr is not set? should use ephemeral
-        b.bind(self.bind_addr)
+        b.bind(self.bind_addr[1])  # FIXME for now just select the port
 
     def accept(self):
-        return self.client_queue.take()
+        s = self.client_queue.take()
+        print "accepted", s
+        return s, "foobar-address"  # FIXME change to addr
                     
     
     # GENERAL METHODS
@@ -335,6 +343,8 @@ class _socketobject(object):
         # FIXME are we sure we are going to be able to send this much data, especially async?
         return len(data)
     
+    sendall = send   # see note above!
+
     def _get_incoming_msg(self):
         if self.incoming_head is None:
             if self.blocking:
