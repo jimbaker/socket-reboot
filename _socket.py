@@ -246,7 +246,6 @@ class _socketobject(object):
         if how & SHUT_WR:
             self.can_write = False
 
-
     def _readable(self):
         return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
                 self.incoming.peek())
@@ -255,10 +254,12 @@ class _socketobject(object):
         return self.channel.isActive() and self.channel.isWritable()
 
     def send(self, data):
+        data = str(data)  # FIXME temporary fix if data is of type buffer
         if not self.can_write:
             raise Exception("Cannot write to closed socket")  # FIXME use actual exception
         future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
         self._handle_channel_future(future, "send")
+        return len(data)
     
     def _get_incoming_msg(self):
         if self.incoming_head is None:
@@ -359,12 +360,8 @@ class SSLSocket(object):
         self.sock._connect(addr)
 
     def send(self, data):
-        print "Sending data over SSL socket... %s, %r" % (type(data), data)
-        data = str(data)  # in case it's a buffer
         self.ssl_writable = False  # special writability step after negotiation
-        self.sock.send(str(data))
-        print "Sent data"
-        return len(data)
+        return self.sock.send(data)
 
     def recv(self, bufsize, flags=0):
         return self.sock.recv(bufsize, flags)
