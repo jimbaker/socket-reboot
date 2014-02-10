@@ -142,9 +142,10 @@ class ClientSocketHandler(ChannelInitializer):
 
     def initChannel(self, client_channel):
         client = _socketobject()
-        client._init_client_mode(client_channel)  # presumably this implies some other settings
+        client._init_client_mode(client_channel)
         self.parent_socket.client_queue.put(client)
-
+        print "Notifing listeners of this server socket", self.parent_socket, "for", client
+        self.parent_socket._notify_selectors()
 
 
 # FIXME how much difference between server and peer sockets?
@@ -152,6 +153,7 @@ class ClientSocketHandler(ChannelInitializer):
 # shutdown should be straightforward - we get to choose what to do
 # with a server socket in terms of accepting new connections
 
+# FIXME raise exceptions for ops permitted on client socket, server socket
 UNKNOWN_SOCKET, CLIENT_SOCKET, SERVER_SOCKET = range(3)
 
 
@@ -285,8 +287,9 @@ class _socketobject(object):
     # SERVER METHODS
     # Calling listen means this is a server socket
 
-
     def listen(self, backlog):
+        self.socket_type = SERVER_SOCKET
+
         b = ServerBootstrap()
         b.group(NIO_GROUP)
         b.channel(NioServerSocketChannel)
@@ -311,8 +314,7 @@ class _socketobject(object):
 
     def accept(self):
         s = self.client_queue.take()
-        print "accepted", s
-        return s, "foobar-address"  # FIXME change to addr
+        return s, s.getpeername()
                     
     
     # GENERAL METHODS
@@ -328,8 +330,13 @@ class _socketobject(object):
             self.can_write = False
 
     def _readable(self):
-        return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
-                self.incoming.peek())
+        if self.socket_type == CLIENT_SOCKET:
+            return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
+                    self.incoming.peek())
+        elif self.socket_type == SERVER_SOCKET:
+            return bool(self.client_queue.peek())
+        else:
+            return False
 
     def _writable(self):
         return self.channel.isActive() and self.channel.isWritable()
@@ -387,7 +394,7 @@ class _socketobject(object):
 
     def getpeername(self):
         remote_addr = self.channel.remoteAddress()
-        return remote_addr.hostAddress, remote_addr.port
+        return remote_addr.getHostString(), remote_addr.getPort()
 
 
 
