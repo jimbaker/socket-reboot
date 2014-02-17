@@ -44,9 +44,20 @@ class SSLSocket(object):
         self.already_handshaked = False
         self.do_handshake_on_connect = do_handshake_on_connect
 
+        if self.do_handshake_on_connect and hasattr(self.sock, "connected") and self.sock.connected:
+            self.already_handshaked = True
+            print "Adding SSL handler to pipeline..."
+            self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
+            self.sock._post_connect()
+            self.sock._notify_selectors()
+            if hasattr(self.sock, "activity_latch"):
+                # Release child socket latch
+                self.sock.activity_latch.countDown()
+
         def handshake_step(x):
             print "Handshaking result", x
-            self.sock._post_connect()
+            if not hasattr(self.sock, "activity_latch"):  # need a better discriminant
+                self.sock._post_connect()
             self.sock._notify_selectors()
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
@@ -68,7 +79,7 @@ class SSLSocket(object):
 
     def recv(self, bufsize, flags=0):
         return self.sock.recv(bufsize, flags)
-        
+
     def close(self):
         # should this also ssl unwrap the channel?
         self.sock.close()

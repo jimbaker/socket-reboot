@@ -16,8 +16,7 @@ from io.netty.channel import ChannelInboundHandlerAdapter, ChannelInitializer, C
 from io.netty.channel.nio import NioEventLoopGroup
 from io.netty.channel.socket.nio import NioSocketChannel, NioServerSocketChannel
 from java.util import NoSuchElementException
-from java.util.concurrent import ArrayBlockingQueue, CopyOnWriteArrayList, LinkedBlockingQueue, TimeUnit
-
+from java.util.concurrent import ArrayBlockingQueue, CopyOnWriteArrayList, CountDownLatch, LinkedBlockingQueue, TimeUnit
 
 # FIXME fill in more constants
 
@@ -138,11 +137,19 @@ class ClientSocketHandler(ChannelInitializer):
         self.parent_socket = parent_socket
 
     def initChannel(self, client_channel):
-        client = _socketobject()
+        client = _socketobject()  # use some child socket object instead that delegates to socketobject, but does the countDown
         client._init_client_mode(client_channel)
-        self.parent_socket.client_queue.put(client)
+        client.activity_latch = CountDownLatch(1)
+
         print "Notifing listeners of this server socket", self.parent_socket, "for", client
+        self.parent_socket.client_queue.put(client)
         self.parent_socket._notify_selectors()
+
+        # must block until the child socket is actually used, because this could involve some setup
+        # this must be triggered for any use! so that's unfortunate extra overhead
+        print "Waiting for activity on this child socket"
+        client.activity_latch.await()
+        print "Latch released"
 
 
 # FIXME how much difference between server and peer sockets?
@@ -232,7 +239,7 @@ class _socketobject(object):
             self.channel = channel
             self.python_inbound_handler = PythonInboundHandler(self)
             self.connect_handlers = [self.python_inbound_handler]
-            self._post_connect()
+            self.connected = True
 
     def _connect(self, addr):
         print "Begin _connect"
