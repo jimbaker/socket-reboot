@@ -3,6 +3,7 @@ from io.netty.handler.ssl import SslHandler
 from javax.net.ssl import SSLContext
 
 from _socket import error
+from _sslcerts import _get_ca_certs_trust_manager, _get_openssl_key_manager
 
 
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
@@ -28,17 +29,16 @@ class SSLInitializer(ChannelInitializer):
         pipeline.addLast("ssl", self.ssl_handler) 
 
 
-
 # Need a delegation wrapper just in case users of this class want to
 # access certs and other info from the underlying SSLEngine
 # FIXME we should use ABC support to make this a subtype of the socket class
 
 class SSLSocket(object):
     
-    def __init__(self, sock, do_handshake_on_connect=True):
+    def __init__(self, sock, do_handshake_on_connect=True, server_side=False):
         self.sock = sock
         self.engine = SSLContext.getDefault().createSSLEngine()
-        self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
+        self.engine.setUseClientMode(not server_side)
         self.ssl_handler = SslHandler(self.engine)
         self.already_handshaked = False
         self.do_handshake_on_connect = do_handshake_on_connect
@@ -103,7 +103,6 @@ class SSLSocket(object):
         return self.sock
 
 
-
 def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=None, ca_certs=None, do_handshake_on_connect=True,
                 suppress_ragged_eofs=True, ciphers=None):
@@ -111,10 +110,13 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
-    return SSLSocket(sock, do_handshake_on_connect=do_handshake_on_connect)
+    return SSLSocket(sock, do_handshake_on_connect=do_handshake_on_connect, server_side=server_side)
 
 
 def unwrap_socket(sock):
     # FIXME removing SSL handler from pipeline should suffice, but low pri for now
     pass
+
+
+
 

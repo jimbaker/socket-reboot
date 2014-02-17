@@ -1,0 +1,150 @@
+import uuid
+from contextlib import closing
+
+from java.io import BufferedInputStream, BufferedReader, FileReader
+from java.security import KeyPair, KeyStore, Security
+from java.security.cert import CertificateException, CertificateFactory, X509Certificate
+from javax.net.ssl import X509KeyManager, X509TrustManager, KeyManagerFactory, SSLContext, TrustManagerFactory 
+
+#from org.bouncycastle.openssl import PEMParser  # FIXME PEMReader is deprecated, but need to figure out jar specifics
+from org.bouncycastle.openssl import PEMReader
+from org.bouncycastle.jce.provider import BouncyCastleProvider
+
+
+# FIXME what happens if reloaded?
+Security.addProvider(BouncyCastleProvider())
+
+
+# build the necessary certificate with a CertificateFactory; this can take the pem format:
+# http://docs.oracle.com/javase/7/docs/api/java/security/cert/CertificateFactory.html#generateCertificate(java.io.InputStream)
+
+# not certain if we can include a private key in the pem file; see 
+# http://stackoverflow.com/questions/7216969/getting-rsa-private-key-from-pem-base64-encoded-private-key-file
+
+def _get_ca_certs_trust_manager(ca_certs):
+    trust_store = KeyStore.getInstance(KeyStore.getDefaultType())
+    trust_store.load(None, None)
+    with open(ca_certs) as f:
+        cf = CertificateFactory.getInstance("X.509")
+        for cert in cf.generateCertificates(BufferedInputStream(f)):
+            trust_store.setCertificateEntry(str(uuid.uuid4()), cert)
+
+    tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+    tmf.init(trust_store)
+    return tmf
+
+
+def _get_openssl_key_manager(cert_file, key_file=None):
+    paths = [key_file] if key_file else []
+    paths.append(cert_file)
+    private_key = None
+    certs = []
+    for path in paths:
+        with closing(FileReader(path)) as reader:
+            br = BufferedReader(reader)
+            while True:
+                obj = PEMReader(br).readObject()
+                if obj is None:
+                    break
+                if isinstance(obj, KeyPair):
+                    private_key = obj.getPrivate()
+                elif isinstance(obj, X509Certificate):
+                    certs.append(obj)
+
+    key_store = KeyStore.getInstance(KeyStore.getDefaultType())
+    key_store.load(None, None)
+    key_store.setKeyEntry(str(uuid.uuid4()), private_key, [], certs)
+    kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+    kmf.init(key_store, [])
+    return kmf
+
+
+# CompositeX509KeyManager and CompositeX509TrustManager allow for mixing together Java built-in managers
+# with new managers to support Python ssl.
+#
+# See http://tersesystems.com/2014/01/13/fixing-the-most-dangerous-code-in-the-world/
+# for a good description of this composite approach.
+#
+# Ported to Python from http://codyaray.com/2013/04/java-ssl-with-multiple-keystores
+# which was inspired by http://stackoverflow.com/questions/1793979/registering-multiple-keystores-in-jvm
+
+class CompositeX509KeyManager(X509KeyManager):
+                                                   
+    def __init__(self, key_managers):
+        self.key_managers = key_managers
+
+    def chooseClientAlias(self, key_type, issuers, socket):
+        for key_manager in self.key_managers:
+            alias = key_manager.chooseClientAlias(key_type, issuers, socket)
+            if alias:
+                return alias;
+        return None
+
+    def chooseServerAlias(self, key_type, issuers, socket):
+        for key_manager in self.key_managers:
+            alias = key_manager.chooseServerAlias(key_type, issuers, socket)
+            if alias:
+                return alias;
+        return None
+    
+    def getPrivateKey(self, alias):
+        for key_manager in self.key_managers:
+            private_key = keyManager.getPrivateKey(alias)
+            if private_key:
+                return private_key
+        return None
+
+    def getCertificateChain(self, alias):
+        for key_manager in self.key_managers:
+            chain = key_manager.getCertificateChain(alias)
+            if chain:
+                return chain
+        return None
+
+    def getClientAliases(self, key_type, issuers):
+        aliases = []
+        for key_manager in self.key_managers:
+            aliases.extend(key_manager.getClientAliases(key_type, issuers))
+        if not aliases:
+            return None
+        else:
+            return aliases
+
+    def getServerAliases(self, key_type, issuers):
+        aliases = []
+        for key_manager in self.key_managers:
+            aliases.extend(key_manager.getServerAliases(key_type, issuers))
+        if not aliases:
+            return None
+        else:
+            return aliases
+
+
+class CompositeX509TrustManager(X509TrustManager):
+
+    def __init__(self, trust_managers):
+        self.trust_managers = trust_managers
+
+    def checkClientTrusted(self, chain, auth_type):
+        for trust_manager in self.trust_managers:
+            try:
+                trustManager.checkClientTrusted(chain, auth_type);
+                return
+            except CertificateException:
+                pass
+        raise CertificateException("None of the TrustManagers trust this certificate chain")
+
+    def checkServerTrusted(self, chain, auth_type):
+        for trust_manager in self.trust_managers:
+            try:
+                trustManager.checkServerTrusted(chain, auth_type);
+                return
+            except CertificateException:
+                pass
+        raise CertificateException("None of the TrustManagers trust this certificate chain")
+
+    def getAcceptedIssuers(self):
+        certs = []
+        for trust_manager in self.trust_managers:
+            certs.extend(trustManager.getAcceptedIssuers())
+        return certs
