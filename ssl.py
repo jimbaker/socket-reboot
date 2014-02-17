@@ -1,9 +1,8 @@
 from io.netty.channel import ChannelInitializer
 from io.netty.handler.ssl import SslHandler
-from javax.net.ssl import SSLContext
 
 from _socket import error
-from _sslcerts import _get_ca_certs_trust_manager, _get_openssl_key_manager
+from _sslcerts import _get_ssl_context
 
 
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
@@ -35,9 +34,11 @@ class SSLInitializer(ChannelInitializer):
 
 class SSLSocket(object):
     
-    def __init__(self, sock, do_handshake_on_connect=True, server_side=False):
+    def __init__(self, sock,
+                 keyfile, certfile, ca_certs,
+                 do_handshake_on_connect, server_side):
         self.sock = sock
-        self.engine = SSLContext.getDefault().createSSLEngine()
+        self.engine = _get_ssl_context(keyfile, certfile, ca_certs).createSSLEngine()
         self.engine.setUseClientMode(not server_side)
         self.ssl_handler = SslHandler(self.engine)
         self.already_handshaked = False
@@ -110,7 +111,10 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
-    return SSLSocket(sock, do_handshake_on_connect=do_handshake_on_connect, server_side=server_side)
+    return SSLSocket(sock, 
+                     keyfile=keyfile, certfile=certfile, ca_certs=ca_certs,
+                     server_side=server_side,
+                     do_handshake_on_connect=do_handshake_on_connect)
 
 
 def unwrap_socket(sock):

@@ -59,6 +59,29 @@ def _get_openssl_key_manager(cert_file, key_file=None):
     return kmf
 
 
+def _get_ssl_context(keyfile, certfile, ca_certs):
+    if certfile is None and ca_certs is None:
+        return SSLContext.getDefault()
+    else:
+        if ca_certs:
+            # should support composite usage below
+            trust_managers = _get_ca_certs_trust_manager(ca_certs).getTrustManagers()
+        else:
+            trust_managers = None
+        if certfile:
+            key_managers = _get_openssl_key_manager(certfile, keyfile).getKeyManagers()
+        else:
+            key_managers = None
+
+        # cache this lookup in the future to avoid re-reading files on every 
+        # lookup
+        context = SSLContext.getInstance("SSL")
+        context.init(key_managers, trust_managers, None)
+        return context
+
+
+
+
 # CompositeX509KeyManager and CompositeX509TrustManager allow for mixing together Java built-in managers
 # with new managers to support Python ssl.
 #
