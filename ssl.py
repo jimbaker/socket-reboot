@@ -40,19 +40,18 @@ class SSLSocket(object):
         self.engine = SSLContext.getDefault().createSSLEngine()
         self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
         self.ssl_handler = SslHandler(self.engine)
-        self.ssl_writable = False
         self.already_handshaked = False
         self.do_handshake_on_connect = do_handshake_on_connect
 
         def handshake_step(x):
             print "Handshaking result", x
             self.sock._post_connect()
-            self.ssl_writable = True
             self.sock._notify_selectors()
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
 
     def connect(self, addr):
+        print "SSL connect", self.do_handshake_on_connect
         self.sock._connect(addr)
         if self.do_handshake_on_connect:
             self.already_handshaked = True
@@ -60,10 +59,10 @@ class SSLSocket(object):
                 print "Adding SSL handler to pipeline..."
                 self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
             else:
+                print "Adding connect handlers to setup..."
                 self.sock.connect_handlers.append(SSLInitializer(self.ssl_handler))
 
     def send(self, data):
-        self.ssl_writable = False  # special writability step after negotiation
         return self.sock.send(data)
 
     def recv(self, bufsize, flags=0):
@@ -80,7 +79,7 @@ class SSLSocket(object):
         return self.sock._readable()
 
     def _writable(self):
-        return self.ssl_writable or self.sock._writable()
+        return self.sock._writable()
 
     def _register_selector(self, selector):
         self.sock._register_selector(selector)
@@ -93,12 +92,16 @@ class SSLSocket(object):
 
     def do_handshake(self):
         if not self.already_handshaked:
-            print "do_handshake"
+            print "Not handshaked, so adding SSL handler"
             self.already_handshaked = True
             self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
 
     def getpeername(self):
         return self.sock.getpeername()
+
+    def fileno(self):
+        return self.sock
+
 
 
 def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE,

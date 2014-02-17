@@ -19,6 +19,26 @@ from java.util import NoSuchElementException
 from java.util.concurrent import ArrayBlockingQueue, CopyOnWriteArrayList, LinkedBlockingQueue, TimeUnit
 
 
+# FIXME fill in more constants
+
+AF_UNSPEC, AF_INET, AF_INET6 = 0, 2, 23
+SOCK_STREAM, SOCK_DGRAM = 1, 2
+SHUT_RD, SHUT_WR = 1, 2
+SHUT_RDWR = SHUT_RD | SHUT_WR
+_GLOBAL_DEFAULT_TIMEOUT = object()
+
+SOL_SOCKET = 0xFFFF
+SO_ERROR = 4
+
+# Specific constants for socket-reboot:
+
+# Keep the highest possible precision for converting from Python's use
+# of floating point for durations to Java's use of both a long
+# duration and a specific unit, in this case TimeUnit.NANOSECONDS
+_TO_NANOSECONDS = 1000000000
+
+_PEER_CLOSED = object()
+
 NIO_GROUP = NioEventLoopGroup()
 
 def _shutdown_threadpool():
@@ -33,27 +53,6 @@ def _shutdown_threadpool():
 # Ensure deallocation of thread pool if PySystemState.cleanup is
 # called; this includes in the event of sigterm
 sys.registerCloser(_shutdown_threadpool)
-
-
-# FIXME fill in more constants
-AF_UNSPEC, AF_INET, AF_INET6 = 0, 2, 23
-SOCK_STREAM, SOCK_DGRAM = 1, 2
-SHUT_RD, SHUT_WR = 1, 2
-SHUT_RDWR = SHUT_RD | SHUT_WR
-_GLOBAL_DEFAULT_TIMEOUT = object()
-
-SOL_SOCKET = 0xFFFF
-SO_ERROR = 4
-
-
-# socket-reboot/Netty 4 specific constants
-
-# Keep the highest possible precision for converting from Python's use
-# of floating point for durations to Java's use of both a long
-# duration and a specific unit, in this case TimeUnit.NANOSECONDS
-_TO_NANOSECONDS = 1000000000
-
-_PEER_CLOSED = object()
 
 
 class error(IOError): pass
@@ -110,19 +109,25 @@ class PythonInboundHandler(ChannelInboundHandlerAdapter):
     def __init__(self, sock):
         self.sock = sock
 
+    def channelActive(self, ctx):
+        print "Channel is active {}".format(self.sock)
+        self.sock._notify_selectors()
+        ctx.fireChannelActive()
+
     def channelRead(self, ctx, msg):
+        print "Channel read {}: {}".format(self.sock, msg)
         msg.retain()  # bump ref count so it can be used in the blocking queue
         self.sock.incoming.put(msg)
         self.sock._notify_selectors()
         ctx.fireChannelRead(msg)
 
     def channelWritabilityChanged(self, ctx):
-        print "Ready for write", self.sock
+        print "Ready for write {}".format(self.sock)
         self.sock._notify_selectors()
         ctx.fireChannelWritabilityChanged()
 
     def exceptionCaught(self, ctx, cause):
-        print "Ready for exception", self.sock, cause
+        print "Ready for exception {}: cause={}".format(self.sock, cause)
         self.sock._notify_selectors()
         ctx.fireExceptionCaught(cause) 
 
@@ -163,6 +168,7 @@ class _socketobject(object):
         self.selectors = CopyOnWriteArrayList()
         self.bind_addr = None
         self.socket_type = UNKNOWN_SOCKET
+        self.wrapper = None
 
     def _register_selector(self, selector):
         self.selectors.addIfAbsent(selector)
@@ -229,9 +235,9 @@ class _socketobject(object):
             self._post_connect()
 
     def _connect(self, addr):
+        print "Begin _connect"
         self._init_client_mode()
         self.connected = True
-        host, port = addr
         self.python_inbound_handler = PythonInboundHandler(self)
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
 
@@ -243,10 +249,19 @@ class _socketobject(object):
         else:
             print "Adding read adapter", self.python_inbound_handler
             bootstrap.handler(self.python_inbound_handler)
+        
         # FIXME also support any options here
+
+        def completed(f):
+            self._notify_selectors()
+            print "Connection future - connection completed", f
+        
+        host, port = addr
         future = bootstrap.connect(host, port)
+        future.addListener(completed)
         self._handle_channel_future(future, "connect")
         self.channel = future.channel()
+        print "Completed _connect on {}".format(self)
 
     def _post_connect(self):
         # Post-connect step is necessary to handle SSL setup,
@@ -267,11 +282,12 @@ class _socketobject(object):
         # Unwrapped sockets can immediately perform the post-connect step
         self._connect(addr)
         self._post_connect()
+        print "Completed connect {} to {}".format(self, addr)
 
     def connect_ex(self, addr):
         self.connect(addr)
         if self.blocking:
-            return 0 #errno.EISCONN
+            return errno.EISCONN
         else:
             return errno.EINPROGRESS
 
@@ -320,7 +336,7 @@ class _socketobject(object):
             self.channel.pipeline().remove(self.python_inbound_handler)
         if how & SHUT_WR:
             self.can_write = False
-
+            
     def _readable(self):
         if self.socket_type == CLIENT_SOCKET:
             return ((self.incoming_head is not None and self.incoming_head.readableBytes()) or
@@ -335,6 +351,7 @@ class _socketobject(object):
 
     def send(self, data):
         data = str(data)  # FIXME temporary fix if data is of type buffer
+        print "Sending data <<<{}>>>".format(data)
         if not self.can_write:
             raise Exception("Cannot write to closed socket")  # FIXME use actual exception
         future = self.channel.writeAndFlush(Unpooled.wrappedBuffer(data))
@@ -365,6 +382,7 @@ class _socketobject(object):
         # have to be locked; I don't believe it is the job of recv to
         # do this; in particular this is the policy of SocketChannel,
         # which underlies Netty's support for such channels.
+        self._may_be_readable = False
         msg = self._get_incoming_msg()
         if msg is None:
             return None
