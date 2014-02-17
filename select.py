@@ -1,5 +1,4 @@
 # dispatches to _socket for actual implementation
 
-from _socket import select
+from _socket import error, select
 
-class error(IOError): pass
