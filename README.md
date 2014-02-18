@@ -29,6 +29,11 @@ In particular, the milestone for releasing Jython 2.7 beta 2 is to
 support pip, which in turn requires support for requests, which in
 turn is blocking on nonblocking SSL support for peer (client) sockets.
 
+FIXME server sockets are supported, blocking/nonblocking/ssl/non ssl
+
+FIXME plan to add some limited functional tests - evolving into a design doc
+with code to be copied over soon
+
 So this means there's no support for server sockets in this spike;
 however I did some quick analysis of the Netty docs that suggests that
 such [support](#server-socket-support) should be straightforward. As a
