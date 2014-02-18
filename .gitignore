@@ -1,0 +1,13 @@
+*.pyc
+*.class
+*~
+dist/*
+build/*
+clamped.egg-info/*
+*.jar
+.DS_Store
+*.egg
+*.tar.gz
+*.pem
+*.diff
+*.txt

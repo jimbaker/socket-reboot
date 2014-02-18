@@ -1,8 +1,8 @@
 from io.netty.channel import ChannelInitializer
 from io.netty.handler.ssl import SslHandler
-from javax.net.ssl import SSLContext
 
 from _socket import error
+from _sslcerts import _get_ssl_context
 
 
 CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED = range(3)
@@ -28,24 +28,34 @@ class SSLInitializer(ChannelInitializer):
         pipeline.addLast("ssl", self.ssl_handler) 
 
 
-
 # Need a delegation wrapper just in case users of this class want to
 # access certs and other info from the underlying SSLEngine
 # FIXME we should use ABC support to make this a subtype of the socket class
 
 class SSLSocket(object):
     
-    def __init__(self, sock, do_handshake_on_connect=True):
+    def __init__(self, sock,
+                 keyfile, certfile, ca_certs,
+                 do_handshake_on_connect, server_side):
         self.sock = sock
-        self.engine = SSLContext.getDefault().createSSLEngine()
-        self.engine.setUseClientMode(True)  # FIXME honor wrap_socket option for this
+        self.engine = _get_ssl_context(keyfile, certfile, ca_certs).createSSLEngine()
+        self.engine.setUseClientMode(not server_side)
         self.ssl_handler = SslHandler(self.engine)
         self.already_handshaked = False
         self.do_handshake_on_connect = do_handshake_on_connect
 
+        if self.do_handshake_on_connect and hasattr(self.sock, "connected") and self.sock.connected:
+            self.already_handshaked = True
+            print "Adding SSL handler to pipeline..."
+            self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
+            self.sock._post_connect()
+            self.sock._notify_selectors()
+            self.sock._unlatch()
+
         def handshake_step(x):
             print "Handshaking result", x
-            self.sock._post_connect()
+            if not hasattr(self.sock, "activity_latch"):  # need a better discriminant
+                self.sock._post_connect()
             self.sock._notify_selectors()
 
         self.ssl_handler.handshakeFuture().addListener(handshake_step)
@@ -67,7 +77,7 @@ class SSLSocket(object):
 
     def recv(self, bufsize, flags=0):
         return self.sock.recv(bufsize, flags)
-        
+
     def close(self):
         # should this also ssl unwrap the channel?
         self.sock.close()
@@ -103,7 +113,6 @@ class SSLSocket(object):
         return self.sock
 
 
-
 def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=CERT_NONE,
                 ssl_version=None, ca_certs=None, do_handshake_on_connect=True,
                 suppress_ragged_eofs=True, ciphers=None):
@@ -111,10 +120,16 @@ def wrap_socket(sock, keyfile=None, certfile=None, server_side=False, cert_reqs=
     # suppress_ragged_eofs - presumably this is an exception we can detect in Netty, the underlying SSLEngine certainly does
     # ssl_version - use SSLEngine.setEnabledProtocols(java.lang.String[])
     # ciphers - SSLEngine.setEnabledCipherSuites(String[] suites)
-    return SSLSocket(sock, do_handshake_on_connect=do_handshake_on_connect)
+    return SSLSocket(sock, 
+                     keyfile=keyfile, certfile=certfile, ca_certs=ca_certs,
+                     server_side=server_side,
+                     do_handshake_on_connect=do_handshake_on_connect)
 
 
 def unwrap_socket(sock):
     # FIXME removing SSL handler from pipeline should suffice, but low pri for now
     pass
+
+
+
 
