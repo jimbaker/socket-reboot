@@ -50,9 +50,7 @@ class SSLSocket(object):
             self.sock.channel.pipeline().addFirst("ssl", self.ssl_handler)
             self.sock._post_connect()
             self.sock._notify_selectors()
-            if hasattr(self.sock, "activity_latch"):
-                # Release child socket latch
-                self.sock.activity_latch.countDown()
+            self.sock._unlatch()
 
         def handshake_step(x):
             print "Handshaking result", x

@@ -137,9 +137,12 @@ class ClientSocketHandler(ChannelInitializer):
         self.parent_socket = parent_socket
 
     def initChannel(self, client_channel):
-        client = _socketobject()  # use some child socket object instead that delegates to socketobject, but does the countDown
+        # use some child socket object instead that delegates to socketobject, but does the countDown;
+        # this is a good argument for mutating the class itself to avoid this overhead
+        # basically set client to LatchedSocketObject;
+        # then change the __class__ to _socketObject (that should be atomic)
+        client = ChildSocket()
         client._init_client_mode(client_channel)
-        client.activity_latch = CountDownLatch(1)
 
         print "Notifing listeners of this server socket", self.parent_socket, "for", client
         self.parent_socket.client_queue.put(client)
@@ -147,9 +150,7 @@ class ClientSocketHandler(ChannelInitializer):
 
         # must block until the child socket is actually used, because this could involve some setup
         # this must be triggered for any use! so that's unfortunate extra overhead
-        print "Waiting for activity on this child socket"
-        client.activity_latch.await()
-        print "Latch released"
+        client._wait_on_latch()
 
 
 # FIXME how much difference between server and peer sockets?
@@ -340,7 +341,10 @@ class _socketobject(object):
 
     def shutdown(self, how):
         if how & SHUT_RD:
-            self.channel.pipeline().remove(self.python_inbound_handler)
+            try:
+                self.channel.pipeline().remove(self.python_inbound_handler)
+            except NoSuchElementException:
+                pass  # already removed, can safely ignore (presumably)
         if how & SHUT_WR:
             self.can_write = False
             
@@ -413,23 +417,48 @@ class _socketobject(object):
         remote_addr = self.channel.remoteAddress()
         return remote_addr.getHostString(), remote_addr.getPort()
 
+    def _unlatch(self):
+        pass  # no-op once mutated from ChildSocket to normal _socketobject
 
 
-# helpful advice for being able to manage ca_certs outside of Java's keystore
-# specifically the example ReloadableX509TrustManager
-# http://jcalcote.wordpress.com/2010/06/22/managing-a-dynamic-java-trust-store/
+class ChildSocket(_socketobject):
+    
+    def __init__(self):
+        super(ChildSocket, self).__init__()
+        self.activity_latch = CountDownLatch(1)
 
-# in the case of http://docs.python.org/2/library/ssl.html#ssl.CERT_REQUIRED
+    def _unlatch(self):
+        self.activity_latch.countDown()
 
-# http://docs.python.org/2/library/ssl.html#ssl.CERT_NONE
-# https://github.com/rackerlabs/romper/blob/master/romper/trust.py#L15
-#
-# it looks like CERT_OPTIONAL simply validates certificates if
-# provided, probably something in checkServerTrusted - maybe a None
-# arg? need to verify as usual with a real system... :)
+    def _wait_on_latch(self):
+        print "Waiting for activity on this child socket"
+        self.activity_latch.await()
+        #self.__class__ = _socketobject        
+        print "Latch released"
 
-# http://alesaudate.wordpress.com/2010/08/09/how-to-dynamically-select-a-certificate-alias-when-invoking-web-services/
-# is somewhat relevant for managing the keyfile, certfile
+    # FIXME raise exception for accept, listen, bind, connect, connect_ex
+
+    # All ops that allow us to characterize the mode of operation of
+    # this socket as being either Start TLS or SSL when connected
+
+    def send(self, data):
+        self._unlatch()
+        return super(ChildSocket, self).send(data)
+
+    def recv(self, bufsize, flags=0):
+        self._unlatch()
+        return super(ChildSocket, self).recv(bufsize, flags)
+
+    # Presumably we would only close/shutdown immediately under exceptional situations;
+    # regardless release the latch
+
+    def close(self):
+        self._unlatch()
+        super(ChildSocket, self).close()
+
+    def shutdown(self, how):
+        self._unlatch()
+        super(ChildSocket, self).shutdown(how)
 
 
 # EXPORTED constructors
@@ -440,7 +469,6 @@ def socket(family=None, type=None, proto=None):
 
 def select(rlist, wlist, xlist, timeout=None):
     return _Select(rlist, wlist, xlist)(timeout)
-
 
 
 def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
