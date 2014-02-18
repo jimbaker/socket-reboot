@@ -137,10 +137,6 @@ class ClientSocketHandler(ChannelInitializer):
         self.parent_socket = parent_socket
 
     def initChannel(self, client_channel):
-        # use some child socket object instead that delegates to socketobject, but does the countDown;
-        # this is a good argument for mutating the class itself to avoid this overhead
-        # basically set client to LatchedSocketObject;
-        # then change the __class__ to _socketObject (that should be atomic)
         client = ChildSocket()
         client._init_client_mode(client_channel)
 
@@ -148,7 +144,7 @@ class ClientSocketHandler(ChannelInitializer):
         self.parent_socket.client_queue.put(client)
         self.parent_socket._notify_selectors()
 
-        # must block until the child socket is actually used, because this could involve some setup
+        # Must block until the child socket is actually used, because this could involve some setup
         # this must be triggered for any use! so that's unfortunate extra overhead
         client._wait_on_latch()
 
@@ -236,7 +232,6 @@ class _socketobject(object):
         self.peer_closed = False
         self.connected = False
         if channel:
-            # add support for SSL somehow FIXME
             self.channel = channel
             self.python_inbound_handler = PythonInboundHandler(self)
             self.connect_handlers = [self.python_inbound_handler]
@@ -428,6 +423,7 @@ class ChildSocket(_socketobject):
         self.activity_latch = CountDownLatch(1)
 
     def _unlatch(self):
+        print "Unlatched"
         self.activity_latch.countDown()
 
     def _wait_on_latch(self):
@@ -442,22 +438,32 @@ class ChildSocket(_socketobject):
     # this socket as being either Start TLS or SSL when connected
 
     def send(self, data):
-        self._unlatch()
+        print "Child send", data
+        if self.activity_latch.getCount():
+            self._post_connect()
+            self._unlatch()
         return super(ChildSocket, self).send(data)
 
     def recv(self, bufsize, flags=0):
-        self._unlatch()
+        print "Child recv", bufsize
+        if self.activity_latch.getCount():
+            self._post_connect()
+            self._unlatch()
         return super(ChildSocket, self).recv(bufsize, flags)
 
     # Presumably we would only close/shutdown immediately under exceptional situations;
     # regardless release the latch
 
     def close(self):
-        self._unlatch()
+        if self.activity_latch.getCount():
+            self._post_connect()
+            self._unlatch()
         super(ChildSocket, self).close()
 
     def shutdown(self, how):
-        self._unlatch()
+        if self.activity_latch.getCount():
+            self._post_connect()
+            self._unlatch()
         super(ChildSocket, self).shutdown(how)
 
 
