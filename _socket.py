@@ -211,8 +211,8 @@ class _socketobject(object):
         # is managed by this method.
 
         # All sockets can be selected on, regardless of blocking/nonblocking
-        def workaround_jython_bug_for_bound_methods(x):
-            # print "Notifying selectors", self
+
+        def workaround_jython_bug_for_bound_methods(_):
             self._notify_selectors()
 
         future.addListener(workaround_jython_bug_for_bound_methods)
@@ -221,7 +221,8 @@ class _socketobject(object):
             if self.timeout is None:
                 return future.sync()
             else:
-                future.await(self.timeout * _TO_NANOSECONDS, TimeUnit.NANOSECONDS)
+                future.await(self.timeout * _TO_NANOSECONDS,
+                             TimeUnit.NANOSECONDS)
                 return future
         else:
             return future
