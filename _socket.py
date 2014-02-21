@@ -155,13 +155,14 @@ class ClientSocketHandler(ChannelInitializer):
 
 def _get_inet_addr(addr):
     # how should this take in account various families?
+    if addr is None:
+        return InetSocketAddress(0)
     host, port = addr
     if host is None:
         if port is None:
             return InetSocketAddress(0)
         return InetSocketAddress(port)
-    else:
-        return InetSocketAddress(host, port)
+    return InetSocketAddress(host, port)
 
 # shutdown should be straightforward - we get to choose what to do
 # with a server socket in terms of accepting new connections
@@ -364,6 +365,7 @@ class _socketobject(object):
     def _datagram_connect(self):
         # FIXME raise exception if not of the right family
         if not self.connected:
+            print "Connecting datagram socket to", self.bind_addr
             self.connected = True
             self.python_inbound_handler = PythonInboundHandler(self)
             bootstrap = Bootstrap().group(NIO_GROUP).channel(NioDatagramChannel)
@@ -384,6 +386,7 @@ class _socketobject(object):
             flags = None
             address = arg1
 
+        print "Sending data", string
         self._datagram_connect()
         # need a helper function to select proper address;
         # this should take in account if AF_INET, AF_INET6
