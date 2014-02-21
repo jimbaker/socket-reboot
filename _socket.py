@@ -154,7 +154,8 @@ class ClientSocketHandler(ChannelInitializer):
 
 
 def _get_inet_addr(addr):
-    # how should this take in account various families?
+    # FIXME how should this function take in account various families?
+    # FIXME better error parsing; follow CPython, this must be defined
     if addr is None:
         return InetSocketAddress(0)
     host, port = addr
@@ -169,9 +170,6 @@ def _get_inet_addr(addr):
 
 # FIXME raise exceptions for ops permitted on client socket, server socket
 UNKNOWN_SOCKET, CLIENT_SOCKET, SERVER_SOCKET, DATAGRAM_SOCKET = range(4)
-
-
-
 
 
 class _socketobject(object):
@@ -241,8 +239,6 @@ class _socketobject(object):
         # Netty 4 supports binding a socket to multiple addresses;
         # apparently this is the not the case for C API sockets
 
-        # FIXME this should resolve to a host, port or possibly an
-        # inet addr, port - do some parsing to ensure the case
         self.bind_addr = address
 
 
@@ -350,8 +346,7 @@ class _socketobject(object):
         b.childHandler(ClientSocketHandler(self))
 
         # returns a ChannelFuture, but regardless for blocking/nonblocking, return immediately
-        # FIXME what if bind_addr is not set? should use ephemeral
-        b.bind(self.bind_addr[1])  # FIXME for now just select the port
+        b.bind(_get_inet_addr(self.bind_addr))
 
     def accept(self):
         s = self.client_queue.take()
