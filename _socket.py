@@ -14,12 +14,15 @@ from io.netty.bootstrap import Bootstrap, ChannelFactory, ServerBootstrap
 from io.netty.buffer import PooledByteBufAllocator, Unpooled
 from io.netty.channel import ChannelInboundHandlerAdapter, ChannelInitializer, ChannelOption
 from io.netty.channel.nio import NioEventLoopGroup
-from io.netty.channel.socket.nio import NioSocketChannel, NioServerSocketChannel
+from io.netty.channel.socket import DatagramPacket
+from io.netty.channel.socket.nio import NioDatagramChannel, NioSocketChannel, NioServerSocketChannel
+from java.net import InetSocketAddress
 from java.util import NoSuchElementException
 from java.util.concurrent import ArrayBlockingQueue, CopyOnWriteArrayList, CountDownLatch, LinkedBlockingQueue, TimeUnit
 
-# FIXME fill in more constants
-
+# FIXME fill in more constants; also most constants should probably
+# come from JNR; they may be arbitrary for our purposes, but some misbehaved code likes to use the
+# arbitrary numbers
 AF_UNSPEC, AF_INET, AF_INET6 = 0, 2, 23
 SOCK_STREAM, SOCK_DGRAM = 1, 2
 SHUT_RD, SHUT_WR = 1, 2
@@ -149,30 +152,49 @@ class ClientSocketHandler(ChannelInitializer):
         client._wait_on_latch()
 
 
-# FIXME how much difference between server and peer sockets?
+
+def _get_inet_addr(addr):
+    # FIXME how should this function take in account various families?
+    # FIXME better error parsing; follow CPython, this must be defined
+    if addr is None:
+        return InetSocketAddress(0)
+    host, port = addr
+    if host is None:
+        if port is None:
+            return InetSocketAddress(0)
+        return InetSocketAddress(port)
+    return InetSocketAddress(host, port)
 
 # shutdown should be straightforward - we get to choose what to do
 # with a server socket in terms of accepting new connections
 
 # FIXME raise exceptions for ops permitted on client socket, server socket
-UNKNOWN_SOCKET, CLIENT_SOCKET, SERVER_SOCKET = range(3)
+UNKNOWN_SOCKET, CLIENT_SOCKET, SERVER_SOCKET, DATAGRAM_SOCKET = range(4)
 
 
 class _socketobject(object):
 
     def __init__(self, family=None, type=None, proto=None):
-        # FIXME need something more vanilla to use for server socket,
-        # client socket, and server-created client sockets
+        # FIXME verify these are supported
+        self.family = family
+        self.type = type
+        self.proto = proto
 
-        # FOR NOW, assume socket.AF_INET, socket.SOCK_STREAM
-        # change all fields below to _FIELD
         self.blocking = True
         self.timeout = None
         self.channel = None
-        self.selectors = CopyOnWriteArrayList()
         self.bind_addr = None
-        self.socket_type = UNKNOWN_SOCKET
-        self.wrapper = None
+        self.selectors = CopyOnWriteArrayList()
+
+        if self.type == SOCK_DGRAM:
+            self.socket_type = DATAGRAM_SOCKET
+            self.connected = False
+            self.incoming = LinkedBlockingQueue()  # list of read buffers
+            self.incoming_head = None  # allows msg buffers to be broken up
+            self.python_inbound_handler = None
+            self.can_write = True
+        else:
+            self.socket_type = UNKNOWN_SOCKET
 
     def _register_selector(self, selector):
         self.selectors.addIfAbsent(selector)
@@ -185,6 +207,16 @@ class _socketobject(object):
             selector.notify()
 
     def _handle_channel_future(self, future, reason):
+        # All differences between nonblocking vs blocking with optional timeouts
+        # is managed by this method.
+
+        # All sockets can be selected on, regardless of blocking/nonblocking
+        def workaround_jython_bug_for_bound_methods(x):
+            # print "Notifying selectors", self
+            self._notify_selectors()
+
+        future.addListener(workaround_jython_bug_for_bound_methods)
+
         if self.blocking:
             if self.timeout is None:
                 return future.sync()
@@ -192,11 +224,6 @@ class _socketobject(object):
                 future.await(self.timeout * _TO_NANOSECONDS, TimeUnit.NANOSECONDS)
                 return future
         else:
-            def workaround_jython_bug_for_bound_methods(x):
-                # print "Notifying selectors", self
-                self._notify_selectors()
-
-            future.addListener(workaround_jython_bug_for_bound_methods)
             return future
 
     def setblocking(self, mode):
@@ -212,8 +239,6 @@ class _socketobject(object):
         # Netty 4 supports binding a socket to multiple addresses;
         # apparently this is the not the case for C API sockets
 
-        # FIXME this should resolve to a host, port or possibly an
-        # inet addr, port - do some parsing to ensure the case
         self.bind_addr = address
 
 
@@ -243,6 +268,7 @@ class _socketobject(object):
         self.connected = True
         self.python_inbound_handler = PythonInboundHandler(self)
         bootstrap = Bootstrap().group(NIO_GROUP).channel(NioSocketChannel)
+        # add any options
 
         # FIXME really this is just for SSL handling
         if self.connect_handlers:
@@ -320,14 +346,52 @@ class _socketobject(object):
         b.childHandler(ClientSocketHandler(self))
 
         # returns a ChannelFuture, but regardless for blocking/nonblocking, return immediately
-        # FIXME what if bind_addr is not set? should use ephemeral
-        b.bind(self.bind_addr[1])  # FIXME for now just select the port
+        b.bind(_get_inet_addr(self.bind_addr))
 
     def accept(self):
         s = self.client_queue.take()
         return s, s.getpeername()
-                    
+
+
+    # DATAGRAM METHODS
     
+    # needs to implicitly bind to 0 if not specified
+
+    def _datagram_connect(self):
+        # FIXME raise exception if not of the right family
+        if not self.connected:
+            print "Connecting datagram socket to", self.bind_addr
+            self.connected = True
+            self.python_inbound_handler = PythonInboundHandler(self)
+            bootstrap = Bootstrap().group(NIO_GROUP).channel(NioDatagramChannel)
+            bootstrap.handler(self.python_inbound_handler)
+            # add any options
+            # such as .option(ChannelOption.SO_BROADCAST, True)
+            future = bootstrap.bind(_get_inet_addr(self.bind_addr))
+            self._handle_channel_future(future, "bind")
+            self.channel = future.channel()
+            print "Completed _datagram_connect on {}".format(self)
+
+    def sendto(self, string, arg1, arg2=None):
+        # Unfortunate overloading
+        if arg2 is not None:
+            flags = arg1
+            address = arg2
+        else:
+            flags = None
+            address = arg1
+
+        print "Sending data", string
+        self._datagram_connect()
+        # need a helper function to select proper address;
+        # this should take in account if AF_INET, AF_INET6
+        packet = DatagramPacket(Unpooled.wrappedBuffer(string),
+                                _get_inet_addr(address))
+        future = self.channel.writeAndFlush(packet)
+        self._handle_channel_future(future, "sendto")
+        return len(string)
+
+
     # GENERAL METHODS
                                              
     def close(self):
@@ -388,7 +452,6 @@ class _socketobject(object):
         # have to be locked; I don't believe it is the job of recv to
         # do this; in particular this is the policy of SocketChannel,
         # which underlies Netty's support for such channels.
-        self._may_be_readable = False
         msg = self._get_incoming_msg()
         if msg is None:
             return None
@@ -401,6 +464,25 @@ class _socketobject(object):
             msg.release()  # return msg ByteBuf back to Netty's pool
             self.incoming_head = None
         return buf.tostring()
+
+    def recvfrom(self, bufsize, flags=0):
+        # FIXME refactor common code from recv
+        self._datagram_connect()
+        packet = self._get_incoming_msg()
+        if packet is None:
+            return None
+        elif packet is _PEER_CLOSED:
+            return ""
+        msg = packet.content()
+        msg_length = msg.readableBytes()
+        buf = jarray.zeros(min(msg_length, bufsize), "b")
+        msg.readBytes(buf)
+        remote_addr = packet.sender()  # may not be available on non datagram channels
+        sender = remote_addr.getHostString(), remote_addr.getPort()
+        if msg.readableBytes() == 0:
+            packet.release()  # return msg ByteBuf back to Netty's pool
+            self.incoming_head = None
+        return buf.tostring(), sender
 
     def fileno(self):
         return self
