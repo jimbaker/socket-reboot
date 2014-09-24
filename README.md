@@ -1,13 +1,12 @@
 PLEASE NOTE
 -----------
 
-This spike captures a snapshot of the work prior to it being completed and merged into [Jython trunk](http://hg.python.org/jython), where it is now
-complete. In particular, UDP, server sockets, poll, etc, etc,
-are now implemented and 100% of test_socket tests are passing, 100%
+This spike captures a snapshot of the work prior to it being completed and merged into [Jython trunk](http://hg.python.org/jython). In particular, UDP, server sockets, poll, etc, etc,
+are now implemented. 100% of test_socket tests are passing, 100%
 of the requests test suite, and pip now works.
 
-But this document is still useful for understanding the design and
-should be updated.
+But this document is still useful for understanding the design. At some point,
+it should be updated howewver.
 
 
 Motivation
