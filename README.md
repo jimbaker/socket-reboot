@@ -1,10 +1,9 @@
 PLEASE NOTE
 -----------
 
-This spike captures a snapshot of the work prior to it being moved to
-https://bitbucket.org/jimbaker/jython-socket-reboot, which is now
-largely complete. In particular, UDP, server sockets, poll, etc, etc,
-are now implemented and > 95% of test_socket tests are passing, 100%
+This spike captures a snapshot of the work prior to it being completed and merged into [Jython trunk](http://hg.python.org/jython), where it is now
+complete. In particular, UDP, server sockets, poll, etc, etc,
+are now implemented and 100% of test_socket tests are passing, 100%
 of the requests test suite, and pip now works.
 
 But this document is still useful for understanding the design and
